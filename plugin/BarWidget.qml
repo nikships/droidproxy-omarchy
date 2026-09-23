@@ -95,27 +95,30 @@ BarWidget {
         anchors.fill: parent
         bar: root.bar
         tooltipText: root.statusTooltip()
+        // Default canvas is 16px and the slot is 27px. 20px sits between the
+        // logo and a full-cell mark.
+        opticalSize: Style.space(20)
 
         iconComponent: Component {
             Item {
+                // The macOS assets are black template masks. MultiEffect
+                // colorizes by luminance, so a black glyph stays black on
+                // the dark bar. These copies are white with the same alpha,
+                // which both shows up on its own and tints to the bar color.
                 Image {
                     id: iconImage
-                    anchors.centerIn: parent
-                    width: Style.space(13)
-                    height: Style.space(13)
+                    anchors.fill: parent
                     source: Qt.resolvedUrl(root.running ? "./assets/icons/icon-active.png" : "./assets/icons/icon-inactive.png")
-                    sourceSize.width: 64
-                    sourceSize.height: 64
+                    sourceSize.width: 128
+                    sourceSize.height: 128
                     fillMode: Image.PreserveAspectFit
-                    visible: false
+                    layer.enabled: true
                 }
-                // The macOS icons are template/mask images; colorization paints
-                // them with the bar foreground so they follow the theme.
                 MultiEffect {
                     anchors.fill: iconImage
                     source: iconImage
-                    colorizationColor: root.running ? root.fg : root.dim
                     colorization: 1.0
+                    colorizationColor: root.running ? root.fg : root.dim
                 }
             }
         }
