@@ -1300,6 +1300,9 @@ Item {
         // per-row toggle (last-enabled protection lives on the daemon).
         readonly property bool showAccountToggles: providerData && providerData.accounts && providerData.accounts.length > 1
         readonly property bool expanded: root.isProviderExpanded(providerData ? providerData.id : "")
+        // Switch, icon, then the name. Sub-rows line up with the name rather
+        // than a fixed offset that lands the icon on top of the switch.
+        readonly property int detailIndent: providerToggle.implicitWidth + Style.space(8) + Style.space(18) + Style.space(8)
         readonly property bool hasExpired: {
             if (!providerData || !providerData.accounts) return false
             for (var i = 0; i < providerData.accounts.length; i++)
@@ -1314,55 +1317,63 @@ Item {
             width: parent.width
             height: Math.max(Style.space(24), providerAddButton.implicitHeight)
 
-            ToggleSwitch {
-                checked: providerData.enabled
-                foreground: providerSection.providerColor
-                cursorRing: false
+            Row {
+                id: providerIdentity
+                spacing: Style.space(8)
                 anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                onToggled: root.service.callNotify("provider.setEnabled", { provider: providerData.id, enabled: !providerData.enabled })
-            }
-
-            Item {
-                width: Style.space(20)
-                height: Style.space(20)
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(34)
+                anchors.right: providerAddButton.visible ? providerAddButton.left : (authSpinner.visible ? authSpinner.left : parent.right)
+                anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
 
-                Image {
-                    id: providerIcon
-                    anchors.centerIn: parent
+                ToggleSwitch {
+                    id: providerToggle
+                    checked: providerData.enabled
+                    foreground: providerSection.providerColor
+                    cursorRing: false
+                    anchors.verticalCenter: parent.verticalCenter
+                    onToggled: root.service.callNotify("provider.setEnabled", { provider: providerData.id, enabled: !providerData.enabled })
+                }
+
+                Item {
+                    id: providerIconSlot
                     width: Style.space(18)
                     height: Style.space(18)
-                    source: Qt.resolvedUrl("./assets/icons/" + providerData.icon)
-                    sourceSize.height: 48
-                    fillMode: Image.PreserveAspectFit
-                    visible: false
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Image {
+                        id: providerIcon
+                        anchors.fill: parent
+                        source: Qt.resolvedUrl("./assets/icons/" + providerData.icon)
+                        sourceSize.height: 48
+                        fillMode: Image.PreserveAspectFit
+                        visible: false
+                        layer.enabled: true
+                    }
+
+                    MultiEffect {
+                        anchors.fill: providerIcon
+                        source: providerIcon
+                        colorizationColor: root.fg
+                        colorization: 1.0
+                        opacity: providerData.enabled ? 1.0 : 0.4
+                    }
                 }
 
-                MultiEffect {
-                    anchors.fill: providerIcon
-                    source: providerIcon
-                    colorizationColor: root.fg
-                    colorization: 1.0
-                    opacity: providerData.enabled ? 1.0 : 0.4
+                Text {
+                    textFormat: Text.PlainText
+                    text: providerData.name
+                    color: providerData.enabled ? root.fg : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.max(0, providerIdentity.width - providerToggle.width - providerIconSlot.width - providerIdentity.spacing * 2)
+                    elide: Text.ElideRight
                 }
             }
 
             Text {
-                textFormat: Text.PlainText
-                text: providerData.name
-                color: providerData.enabled ? root.fg : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                font.bold: true
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(60)
-                anchors.verticalCenter: parent.verticalCenter
-            }
-
-            Text {
+                id: authSpinner
                 visible: providerData.authenticating
                 textFormat: Text.PlainText
                 text: "↻"
@@ -1417,7 +1428,7 @@ Item {
                 id: grokContent
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.leftMargin: Style.space(28)
+                anchors.leftMargin: providerSection.detailIndent
                 spacing: Style.space(4)
 
                 Text {
@@ -1483,7 +1494,7 @@ Item {
                     id: metaAuthContent
                     anchors.left: parent.left
                     anchors.right: parent.right
-                    anchors.leftMargin: Style.space(28)
+                    anchors.leftMargin: providerSection.detailIndent
                     spacing: Style.space(4)
 
                     Text {
@@ -1600,7 +1611,7 @@ Item {
                 id: fastModeContent
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.leftMargin: Style.space(28)
+                anchors.leftMargin: providerSection.detailIndent
                 spacing: Style.space(4)
 
                 MouseArea {
@@ -1686,7 +1697,7 @@ Item {
                 id: accountsContent
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.leftMargin: Style.space(28)
+                anchors.leftMargin: providerSection.detailIndent
                 spacing: Style.space(4)
 
                 Text {
