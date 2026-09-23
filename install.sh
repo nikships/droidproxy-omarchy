@@ -14,8 +14,6 @@ set -euo pipefail
 
 REPO="nikships/droidproxy-omarchy"
 FEED_URL="${DROIDPROXY_FEED_URL:-https://github.com/${REPO}/releases/latest/download/latest.json}"
-INSTALL_ROOT="${HOME}/.local/share/droidproxy"
-BIN_DIR="${HOME}/.local/bin"
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33mWARNING:\033[0m %s\n' "$*" >&2; }
@@ -106,7 +104,7 @@ if curl -fsSL "$SIG_URL" -o "$SIG_FILE" 2>/dev/null; then
   if command -v openssl >/dev/null 2>&1; then
     # The public key is a raw 32-byte ed25519 key stored base64; openssl needs
     # DER (302a300506032b6570032100 + key) wrapped in PEM.
-    PUB_B64="6zisXnU+IrMiOPOAimuHxm0p9YN4VCcQfGhhUpymiCw="
+    PUB_B64="CZQkgDPfujZE1bt3q5HxTyWjvWwSWEQ7iRlbkJ4Ehpk="
     printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00' > "${WORK_DIR}/pubkey.der"
     printf '%s' "$PUB_B64" | base64 -d >> "${WORK_DIR}/pubkey.der"
     {

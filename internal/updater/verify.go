@@ -15,7 +15,7 @@ import (
 // PublicKey is the base64 raw 32-byte ed25519 public key every release
 // signature must verify against. PLACEHOLDER — replace with the real key
 // (tools/release keygen prints it).
-const PublicKey = "6zisXnU+IrMiOPOAimuHxm0p9YN4VCcQfGhhUpymiCw="
+const PublicKey = "CZQkgDPfujZE1bt3q5HxTyWjvWwSWEQ7iRlbkJ4Ehpk="
 
 // defaultVerifier is the real ed25519 verification.
 func defaultVerifier(pubKey, message, sig []byte) error {

@@ -138,6 +138,9 @@ func TestSystemdHelpers(t *testing.T) {
 }
 
 func TestUnderSystemd(t *testing.T) {
+	// GitHub Actions sets these; the function returns true before the runner is consulted.
+	t.Setenv("INVOCATION_ID", "")
+	t.Setenv("JOURNAL_STREAM", "")
 	f := withRunner(t, &fakeRunner{failRun: map[string]error{"systemctl --user is-system-running": errors.New("no manager")}})
 	if UnderSystemd() {
 		t.Error("UnderSystemd should be false when the user manager is unreachable")

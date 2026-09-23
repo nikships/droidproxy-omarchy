@@ -12,7 +12,7 @@ import (
 
 // publicKey is the base64 raw 32-byte ed25519 release key (same constant as
 // internal/updater.PublicKey; kept here so the tool works standalone).
-const publicKey = "6zisXnU+IrMiOPOAimuHxm0p9YN4VCcQfGhhUpymiCw="
+const publicKey = "CZQkgDPfujZE1bt3q5HxTyWjvWwSWEQ7iRlbkJ4Ehpk="
 
 func sha256Sum(data []byte) []byte {
 	sum := sha256.Sum256(data)
