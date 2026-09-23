@@ -113,8 +113,9 @@ if curl -fsSL "$SIG_URL" -o "$SIG_FILE" 2>/dev/null; then
       echo
       echo "-----END PUBLIC KEY-----"
     } > "${WORK_DIR}/pubkey.pem"
+    openssl base64 -d -A -in "$SIG_FILE" -out "${SIG_FILE}.raw"
     if openssl pkeyutl -verify -pubin -inkey "${WORK_DIR}/pubkey.pem" -rawin \
-         -in "${WORK_DIR}/${TARBALL}" -sigfile "$SIG_FILE" >/dev/null 2>&1; then
+         -in "${WORK_DIR}/${TARBALL}" -sigfile "${SIG_FILE}.raw" >/dev/null 2>&1; then
       SIGNATURE_OK=1
       info "ed25519 signature verified."
     else
