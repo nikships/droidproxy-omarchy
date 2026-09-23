@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nikships/droidproxy-omarchy/internal/prefs"
 )
@@ -271,6 +272,39 @@ func TestProxyMetaResponsesTLSForward(t *testing.T) {
 	defer resp.Body.Close()
 	got, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 || !strings.Contains(string(got), `resp_1`) {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, got)
+	}
+}
+
+func TestProxyAnswersGetWithoutContentLength(t *testing.T) {
+	isolateHome(t)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			t.Errorf("backend saw %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	t.Cleanup(backend.Close)
+
+	host, port := splitHostPort(t, backend.Listener.Addr().String())
+	p := New()
+	p.Port = freePort(t)
+	p.TargetHost = host
+	p.TargetPort = port
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Stop)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/models", p.Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(got), `"data"`) {
 		t.Fatalf("status=%d body=%s", resp.StatusCode, got)
 	}
 }

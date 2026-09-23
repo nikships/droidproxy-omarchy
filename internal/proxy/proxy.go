@@ -225,13 +225,14 @@ func readHTTPRequest(conn net.Conn) ([]byte, error) {
 		}
 		if headerEnd >= 0 {
 			bodyReceived := len(buf) - headerEnd
-			if contentLength >= 0 {
-				if bodyReceived >= contentLength {
-					return buf[:headerEnd+contentLength], nil
-				}
-			} else if err == io.EOF {
-				// No Content-Length: body ends when the client closes.
+			if contentLength < 0 {
+				// No Content-Length: the request is complete at the header
+				// boundary. Waiting for EOF deadlocks clients that keep the
+				// connection open for the response (GET /v1/models).
 				return buf, nil
+			}
+			if bodyReceived >= contentLength {
+				return buf[:headerEnd+contentLength], nil
 			}
 		}
 		if err == io.EOF {
