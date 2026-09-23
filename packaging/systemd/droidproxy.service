@@ -1,0 +1,13 @@
+[Unit]
+Description=DroidProxy server
+Documentation=https://github.com/nikships/droidproxy-omarchy
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/share/droidproxy/current/bin/droidproxy serve
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

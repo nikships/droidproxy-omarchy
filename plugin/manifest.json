@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "nikships.droidproxy",
+  "name": "DroidProxy",
+  "version": "1.0.0",
+  "author": "nikships",
+  "license": "MIT",
+  "description": "DroidProxy menu-bar widget and settings: server control, provider accounts, OAuth quota usage, remote management, and updates. Talks to the droidproxy daemon over its ctl CLI.",
+  "kinds": ["service", "bar-widget", "panel"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Settings.qml"
+  },
+  "barWidget": {
+    "displayName": "DroidProxy",
+    "description": "DroidProxy server status with a quick menu: start/stop, copy URL, dashboard, updates, and the full settings surface.",
+    "category": "Network",
+    "aliases": ["droidproxy", "proxy"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "command": "droidproxy"
+    },
+    "schema": [
+      {
+        "key": "command",
+        "type": "string",
+        "label": "CLI command",
+        "defaultValue": "droidproxy",
+        "description": "Path to the droidproxy CLI used for ctl watch/ctl call. Override with a mock or alternate binary."
+      }
+    ]
+  }
+}

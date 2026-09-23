@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=DroidProxy
+GenericName=LLM proxy manager
+Comment=Manage the DroidProxy local proxy for coding agents
+Exec=droidproxy open
+Icon=droidproxy
+Terminal=false
+Categories=Network;Development;
+Keywords=droidproxy;proxy;llm;
+NoDisplay=true

@@ -1,0 +1,152 @@
+name: Release
+
+# Every push to main cuts a release. Documentation-only pushes are skipped
+# because they would ship a byte-identical build.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.github/dependabot.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override version (without leading v). Leave empty to auto-increment patch.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Build, sign & publish
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve version
+        id: version
+        env:
+          OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          PREV_TAG=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          if [ -n "$OVERRIDE" ]; then
+            VERSION="${OVERRIDE#v}"
+          elif [ -z "$PREV_TAG" ]; then
+            VERSION="1.0.0"
+          else
+            IFS='.' read -r MAJOR MINOR PATCH <<< "${PREV_TAG#v}"
+            VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version '$VERSION'"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION already exists"; exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$VERSION (previous: ${PREV_TAG:-none})"
+
+      - name: Build tarballs
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            scripts/build-release.sh "$VERSION" "$arch" dist
+          done
+          ls -l dist
+
+      - name: Smoke test amd64 build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          tar -xzf "dist/droidproxy-$VERSION-linux-amd64.tar.gz" -C "$tmp"
+          root="$tmp/droidproxy-$VERSION-linux-amd64"
+          "$root/bin/droidproxy" version | tee /dev/stderr | grep -q "$VERSION"
+          "$root/libexec/cli-proxy-api" -h 2>&1 | head -n 1 | grep -q "CLIProxyAPI Version"
+          test -f "$root/share/plugin/manifest.json"
+
+      - name: Sign
+        env:
+          DROIDPROXY_SIGNING_KEY: ${{ secrets.DROIDPROXY_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DROIDPROXY_SIGNING_KEY" ]; then
+            echo "::error::DROIDPROXY_SIGNING_KEY secret is not set"; exit 1
+          fi
+          go build -o /tmp/release-tool ./tools/release
+          for f in dist/*.tar.gz; do
+            /tmp/release-tool sign "$f"
+            # Proves the secret matches the public key compiled into the app,
+            # so a mismatched key can never ship un-installable updates.
+            /tmp/release-tool verify "$f"
+          done
+
+      - name: Release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PREV_TAG: ${{ steps.version.outputs.prev_tag }}
+        run: |
+          set -euo pipefail
+          {
+            if [ -n "$PREV_TAG" ]; then
+              git log --no-merges --pretty='- %s (%h)' "$PREV_TAG..HEAD"
+            else
+              echo "- First DroidProxy for Omarchy release."
+            fi
+            echo
+            echo "Bundled CLIProxyAPI: $(tr -d '[:space:]' < CLIPROXYAPI_VERSION)"
+            echo
+            echo "Install: \`curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | bash\`"
+            echo "Existing installs update themselves (Settings → Updates)."
+          } > notes.md
+          cat notes.md
+
+      - name: Manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          /tmp/release-tool manifest \
+            --version "$VERSION" \
+            --tag "v$VERSION" \
+            --notes-file notes.md \
+            --dist dist \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/v$VERSION"
+          cat dist/latest.json
+          cat dist/SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "DroidProxy $VERSION" \
+            --notes-file notes.md \
+            --latest
