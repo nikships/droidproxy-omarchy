@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/nikships/droidproxy-omarchy/internal/auth"
+	"github.com/nikships/droidproxy-omarchy/internal/grok"
+	"github.com/nikships/droidproxy-omarchy/internal/meta"
 )
 
 func TestParseClaudeWindowsTreatsUtilizationAsPercentForSonnetBucket(t *testing.T) {
@@ -265,7 +267,7 @@ func TestRefreshFetchesCodexUsageAndSortsResults(t *testing.T) {
 	env.tracker.SetOnChange(func() { changes.Add(1) })
 
 	codex := auth.Account{ID: filepath.Base(codexPath), Email: "a@b.com", Type: auth.Codex, FilePath: codexPath}
-	env.tracker.Refresh([]auth.Account{codex}, nil)
+	env.tracker.Refresh([]auth.Account{codex}, nil, nil, nil)
 
 	if !env.tracker.IsRefreshing() {
 		t.Fatal("expected refreshing state")
@@ -303,7 +305,7 @@ func TestRefreshClearsSnapshotWhenNoEligibleAccounts(t *testing.T) {
 	expiredAt := time.Now().Add(-time.Hour)
 	expired := auth.Account{ID: "y", Email: "c@d.com", Type: auth.Codex, Expired: &expiredAt}
 
-	env.tracker.Refresh([]auth.Account{disabled, expired}, nil)
+	env.tracker.Refresh([]auth.Account{disabled, expired}, nil, nil, nil)
 
 	if env.tracker.IsRefreshing() {
 		t.Fatal("unexpected refreshing state")
@@ -317,7 +319,7 @@ func TestRefreshReportsMissingAccessToken(t *testing.T) {
 	env := newTestEnv(t, nil, nil, nil)
 	path := writeAccountFile(t, env.home, "codex-a@b.com.json", map[string]any{"type": "codex", "email": "a@b.com"})
 
-	env.tracker.Refresh([]auth.Account{{ID: filepath.Base(path), Email: "a@b.com", Type: auth.Codex, FilePath: path}}, nil)
+	env.tracker.Refresh([]auth.Account{{ID: filepath.Base(path), Email: "a@b.com", Type: auth.Codex, FilePath: path}}, nil, nil, nil)
 	waitFor(t, func() bool { return !env.tracker.IsRefreshing() })
 
 	accounts := env.tracker.Accounts()
@@ -366,7 +368,7 @@ func TestRefreshClaudeWithExpiredTokenRefreshesAndRetriesOn401(t *testing.T) {
 
 	env.tracker.Refresh(nil, []auth.Account{{
 		ID: filepath.Base(claudePath), Email: "a@b.com", Type: auth.Claude, FilePath: claudePath,
-	}})
+	}}, nil, nil)
 	waitFor(t, func() bool { return !env.tracker.IsRefreshing() })
 
 	accounts := env.tracker.Accounts()
@@ -417,7 +419,7 @@ func TestRefreshClaudeReportsUsageAPIStatus(t *testing.T) {
 
 	env.tracker.Refresh(nil, []auth.Account{{
 		ID: filepath.Base(path), Email: "a@b.com", Type: auth.Claude, FilePath: path,
-	}})
+	}}, nil, nil)
 	waitFor(t, func() bool { return !env.tracker.IsRefreshing() })
 
 	accounts := env.tracker.Accounts()
@@ -435,4 +437,154 @@ func readAll(r *http.Request) string {
 		return ""
 	}
 	return string(data)
+}
+
+func TestParseGrokWindowsFromCreditPercent(t *testing.T) {
+	payload := `{"config":{"creditUsagePercent":62.5,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2030-01-08T00:00:00Z"}}}`
+	windows := ParseGrokWindows([]byte(payload))
+	if len(windows) != 1 {
+		t.Fatalf("windows = %+v", windows)
+	}
+	w := windows[0]
+	if w.Title != "Weekly" {
+		t.Fatalf("title = %q", w.Title)
+	}
+	if w.UsedPercent == nil || *w.UsedPercent != 62.5 {
+		t.Fatalf("used = %v", w.UsedPercent)
+	}
+	if w.RemainingPercent == nil || *w.RemainingPercent != 37.5 || !w.HasRemaining {
+		t.Fatalf("remaining = %+v", w)
+	}
+	if w.ResetText == "" {
+		t.Fatal("empty reset text")
+	}
+}
+
+func TestParseGrokWindowsFromOnDemandCap(t *testing.T) {
+	payload := `{"config":{"onDemandCap":{"val":200},"onDemandUsed":{"val":50},"currentPeriod":{"type":"USAGE_PERIOD_TYPE_MONTHLY","end":"2030-02-01T00:00:00Z"}}}`
+	windows := ParseGrokWindows([]byte(payload))
+	if len(windows) != 1 || windows[0].Title != "Monthly" {
+		t.Fatalf("windows = %+v", windows)
+	}
+	if windows[0].UsedPercent == nil || *windows[0].UsedPercent != 25 {
+		t.Fatalf("used = %v", windows[0].UsedPercent)
+	}
+}
+
+func TestParseGrokWindowsRejectsMissingConfig(t *testing.T) {
+	for _, payload := range []string{`{}`, `{"config":{}}`, `{invalid`, `{"config":{"onDemandCap":{"val":0},"onDemandUsed":{"val":1}}}`} {
+		if windows := ParseGrokWindows([]byte(payload)); len(windows) != 0 {
+			t.Fatalf("payload %q gave %v", payload, windows)
+		}
+	}
+}
+
+func TestMetaWindowTitle(t *testing.T) {
+	if got := MetaWindowTitle(300); got != "5-hour" {
+		t.Fatalf("300 -> %q", got)
+	}
+	if got := MetaWindowTitle(90); got != "90-min" {
+		t.Fatalf("90 -> %q", got)
+	}
+	if got := MetaWindowTitle(0); got != "Window" {
+		t.Fatalf("0 -> %q", got)
+	}
+}
+
+func TestRefreshMetaReadsLocalStore(t *testing.T) {
+	env := newTestEnv(t, nil, nil, nil)
+	observed := time.Now().Add(-time.Hour).Round(time.Second)
+	resets := time.Now().Add(2 * time.Hour).Round(time.Second)
+	weekly := time.Now().Add(24 * time.Hour).Round(time.Second)
+	env.tracker.SetMetaSnapshots(func(accountID string) *meta.UsageSnapshot {
+		if accountID != "meta-1" {
+			return nil
+		}
+		return &meta.UsageSnapshot{
+			WindowUsedPercent: 40, WindowResetsAt: resets, WindowDurationMins: 300,
+			WeeklyUsedPercent: 12, WeeklyResetsAt: weekly, ObservedAt: observed,
+		}
+	})
+	env.tracker.Refresh(nil, nil, nil, []auth.Account{
+		{ID: "meta-1", Email: "m@x.com", Type: auth.Meta},
+		{ID: "meta-2", Email: "n@x.com", Type: auth.Meta},
+	})
+	waitFor(t, func() bool { return !env.tracker.IsRefreshing() })
+
+	accounts := env.tracker.Accounts()
+	if len(accounts) != 2 {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	if accounts[0].Error != "" || len(accounts[0].Windows) != 2 {
+		t.Fatalf("meta-1 = %+v", accounts[0])
+	}
+	if accounts[0].Windows[0].Title != "5-hour" || accounts[0].Windows[1].Title != "Weekly" {
+		t.Fatalf("windows = %+v", accounts[0].Windows)
+	}
+	if !strings.Contains(accounts[0].Windows[0].ResetText, "as of") {
+		t.Fatalf("reset = %q", accounts[0].Windows[0].ResetText)
+	}
+	if accounts[1].Error == "" {
+		t.Fatalf("meta-2 should report no observations: %+v", accounts[1])
+	}
+}
+
+func TestRefreshGrokUsesBearerAndParsesWindow(t *testing.T) {
+	var gotAuth, gotTokenAuth string
+	grokServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotTokenAuth = r.Header.Get("X-XAI-Token-Auth")
+		_, _ = w.Write([]byte(`{"config":{"creditUsagePercent":20,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2030-01-08T00:00:00Z"}}}`))
+	}))
+	t.Cleanup(grokServer.Close)
+
+	env := newTestEnv(t, nil, nil, nil)
+	env.tracker.SetBaseURLsWithGrok(serverURL(env.codex), serverURL(env.claude), serverURL(env.tokens), grokServer.URL)
+	env.tracker.SetGrokToken(func() (string, *grok.AuthError) { return "grok-bearer", nil })
+	// activeGrokAccounts only keeps the file LoadActiveCredentials serves;
+	// HOME already points at env.home, so drop a matching credential file
+	// into the auth dir scan location.
+	authDir := filepath.Join(env.home, ".cli-proxy-api")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	grokPath := writeAccountFile(t, authDir, "grok-cli.json", map[string]any{
+		"type": "grok-cli", "access": "a", "refresh": "r", "expires": float64(time.Now().Add(time.Hour).UnixMilli()),
+	})
+
+	env.tracker.Refresh(nil, nil, []auth.Account{
+		{ID: "grok-cli.json", Email: "g@x.com", Type: auth.Grok, FilePath: grokPath},
+	}, nil)
+	waitFor(t, func() bool { return !env.tracker.IsRefreshing() })
+
+	accounts := env.tracker.Accounts()
+	if len(accounts) != 1 || accounts[0].Error != "" {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	if len(accounts[0].Windows) != 1 || accounts[0].Windows[0].Title != "Weekly" {
+		t.Fatalf("windows = %+v", accounts[0].Windows)
+	}
+	if gotAuth != "Bearer grok-bearer" || gotTokenAuth != "xai-grok-cli" {
+		t.Fatalf("auth headers = %q %q", gotAuth, gotTokenAuth)
+	}
+}
+
+func TestUpdateMetaAccountsOnlyTouchesMeta(t *testing.T) {
+	env := newTestEnv(t, nil, nil, nil)
+	env.tracker.SetMetaSnapshots(func(accountID string) *meta.UsageSnapshot { return nil })
+	env.tracker.Refresh(nil, nil, nil, []auth.Account{{ID: "m1", Email: "m@x.com", Type: auth.Meta}})
+	waitFor(t, func() bool { return !env.tracker.IsRefreshing() })
+
+	observed := time.Now().Add(-time.Minute).Round(time.Second)
+	env.tracker.SetMetaSnapshots(func(accountID string) *meta.UsageSnapshot {
+		return &meta.UsageSnapshot{
+			WindowUsedPercent: 1, WindowResetsAt: time.Now().Add(time.Hour), WindowDurationMins: 300,
+			WeeklyUsedPercent: 2, WeeklyResetsAt: time.Now().Add(24 * time.Hour), ObservedAt: observed,
+		}
+	})
+	env.tracker.UpdateMetaAccounts([]auth.Account{{ID: "m1", Email: "m@x.com", Type: auth.Meta}})
+	accounts := env.tracker.Accounts()
+	if len(accounts) != 1 || accounts[0].Error != "" || len(accounts[0].Windows) != 2 {
+		t.Fatalf("accounts = %+v", accounts)
+	}
 }

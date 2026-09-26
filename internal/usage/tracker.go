@@ -10,13 +10,16 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nikships/droidproxy-omarchy/internal/auth"
+	"github.com/nikships/droidproxy-omarchy/internal/grok"
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
+	"github.com/nikships/droidproxy-omarchy/internal/meta"
 )
 
 const (
@@ -25,6 +28,7 @@ const (
 	codexUsageEndpoint  = "https://chatgpt.com/backend-api/wham/usage"
 	claudeUsageEndpoint = "https://api.anthropic.com/api/oauth/usage"
 	claudeTokenEndpoint = "https://platform.claude.com/v1/oauth/token"
+	grokUsageEndpoint   = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 
 	// Public OAuth client id of the Claude CLI, same as the macOS app.
 	claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -43,6 +47,14 @@ type Tracker struct {
 	codexUsageURL  string
 	claudeUsageURL string
 	claudeTokenURL string
+	grokUsageURL   string
+
+	// grokToken resolves the SuperGrok bearer. Defaults to grok.AccessToken;
+	// tests inject a stub so no refresh is attempted.
+	grokToken func() (string, *grok.AuthError)
+	// metaSnapshots reads last-observed Meta usage. Defaults to the shared
+	// store; tests inject an in-memory stub.
+	metaSnapshots func(accountID string) *meta.UsageSnapshot
 }
 
 // NewTracker creates a tracker with the default HTTP client and endpoints.
@@ -52,6 +64,9 @@ func NewTracker() *Tracker {
 		codexUsageURL:  codexUsageEndpoint,
 		claudeUsageURL: claudeUsageEndpoint,
 		claudeTokenURL: claudeTokenEndpoint,
+		grokUsageURL:   grokUsageEndpoint,
+		grokToken:      grok.AccessToken,
+		metaSnapshots:  func(accountID string) *meta.UsageSnapshot { return meta.SharedUsageStore().Snapshot(accountID) },
 	}
 }
 
@@ -64,8 +79,27 @@ func (t *Tracker) SetClient(client *http.Client) {
 
 // SetBaseURLs overrides the endpoints (tests point these at httptest servers).
 func (t *Tracker) SetBaseURLs(codexUsage, claudeUsage, claudeToken string) {
+	t.SetBaseURLsWithGrok(codexUsage, claudeUsage, claudeToken, grokUsageEndpoint)
+}
+
+// SetBaseURLsWithGrok overrides all endpoints including the Grok billing URL.
+func (t *Tracker) SetBaseURLsWithGrok(codexUsage, claudeUsage, claudeToken, grokUsage string) {
 	t.mu.Lock()
-	t.codexUsageURL, t.claudeUsageURL, t.claudeTokenURL = codexUsage, claudeUsage, claudeToken
+	t.codexUsageURL, t.claudeUsageURL, t.claudeTokenURL, t.grokUsageURL = codexUsage, claudeUsage, claudeToken, grokUsage
+	t.mu.Unlock()
+}
+
+// SetGrokToken injects the SuperGrok bearer resolver (tests only).
+func (t *Tracker) SetGrokToken(fn func() (string, *grok.AuthError)) {
+	t.mu.Lock()
+	t.grokToken = fn
+	t.mu.Unlock()
+}
+
+// SetMetaSnapshots injects the Meta usage reader (tests only).
+func (t *Tracker) SetMetaSnapshots(fn func(accountID string) *meta.UsageSnapshot) {
+	t.mu.Lock()
+	t.metaSnapshots = fn
 	t.mu.Unlock()
 }
 
@@ -91,11 +125,12 @@ func (t *Tracker) IsRefreshing() bool {
 	return t.refreshin
 }
 
-// Refresh fetches usage for every enabled, non-expired Codex and Claude
+// Refresh fetches usage for every eligible Codex, Claude, Grok, and Meta
 // account. Accounts are queried concurrently; the snapshot starts as loading
 // placeholders and is replaced by the sorted results. Disabled and expired
-// accounts are skipped, and an empty selection clears the snapshot.
-func (t *Tracker) Refresh(codexAccounts, claudeAccounts []auth.Account) {
+// accounts are skipped (Meta ignores key expiry: a stale card still shows its
+// "as of" time), and an empty selection clears the snapshot.
+func (t *Tracker) Refresh(codexAccounts, claudeAccounts, grokAccounts, metaAccounts []auth.Account) {
 	var enabled []auth.Account
 	for _, a := range codexAccounts {
 		if !a.Disabled && !a.IsExpired() {
@@ -104,6 +139,12 @@ func (t *Tracker) Refresh(codexAccounts, claudeAccounts []auth.Account) {
 	}
 	for _, a := range claudeAccounts {
 		if !a.Disabled && !a.IsExpired() {
+			enabled = append(enabled, a)
+		}
+	}
+	enabled = append(enabled, activeGrokAccounts(grokAccounts)...)
+	for _, a := range metaAccounts {
+		if !a.Disabled {
 			enabled = append(enabled, a)
 		}
 	}
@@ -140,9 +181,14 @@ func (t *Tracker) Refresh(codexAccounts, claudeAccounts []auth.Account) {
 		wg.Add(1)
 		go func(i int, account auth.Account) {
 			defer wg.Done()
-			if account.Type == auth.Claude {
+			switch account.Type {
+			case auth.Claude:
 				results[i] = t.fetchClaudeUsage(account, generation)
-			} else {
+			case auth.Grok:
+				results[i] = t.fetchGrokUsage(account)
+			case auth.Meta:
+				results[i] = t.fetchMetaUsage(account)
+			default:
 				results[i] = t.fetchCodexUsage(account, generation)
 			}
 		}(i, account)
@@ -155,14 +201,7 @@ func (t *Tracker) Refresh(codexAccounts, claudeAccounts []auth.Account) {
 			t.mu.Unlock()
 			return
 		}
-		sorted := append([]AccountUsage(nil), results...)
-		sort.SliceStable(sorted, func(i, j int) bool {
-			if sorted[i].Provider == sorted[j].Provider {
-				return strings.ToLower(sorted[i].Email) < strings.ToLower(sorted[j].Email)
-			}
-			return sorted[i].Provider < sorted[j].Provider
-		})
-		t.accounts = sorted
+		t.accounts = sortAccountUsages(results)
 		t.refreshin = false
 		notify := t.onChange
 		t.mu.Unlock()
@@ -170,6 +209,74 @@ func (t *Tracker) Refresh(codexAccounts, claudeAccounts []auth.Account) {
 			notify()
 		}
 	}()
+}
+
+// UpdateMetaAccounts replaces only the Meta cards from the local
+// last-observed store. Used for live updates when ThinkingProxy sniffs a new
+// snapshot, so a Meta response does not refetch Codex/Claude/Grok usage over
+// the network.
+func (t *Tracker) UpdateMetaAccounts(metaAccounts []auth.Account) {
+	var fresh []AccountUsage
+	for _, a := range metaAccounts {
+		if !a.Disabled {
+			fresh = append(fresh, t.fetchMetaUsage(a))
+		}
+	}
+	t.mu.Lock()
+	hasMeta := false
+	for _, a := range t.accounts {
+		if a.Provider == string(auth.Meta) {
+			hasMeta = true
+			break
+		}
+	}
+	if !hasMeta && len(fresh) == 0 {
+		t.mu.Unlock()
+		return
+	}
+	kept := make([]AccountUsage, 0, len(t.accounts)+len(fresh))
+	for _, a := range t.accounts {
+		if a.Provider != string(auth.Meta) {
+			kept = append(kept, a)
+		}
+	}
+	t.accounts = sortAccountUsages(append(kept, fresh...))
+	notify := t.onChange
+	t.mu.Unlock()
+	if notify != nil {
+		notify()
+	}
+}
+
+// sortAccountUsages returns a sorted copy: by provider id, then by email
+// (case-insensitive).
+func sortAccountUsages(values []AccountUsage) []AccountUsage {
+	sorted := append([]AccountUsage(nil), values...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Provider == sorted[j].Provider {
+			return strings.ToLower(sorted[i].Email) < strings.ToLower(sorted[j].Email)
+		}
+		return sorted[i].Provider < sorted[j].Provider
+	})
+	return sorted
+}
+
+// activeGrokAccounts mirrors the macOS tracker: the Grok bearer resolver only
+// serves the newest enabled credential file, so other Grok auth files have no
+// token source (and are not used for requests either).
+func activeGrokAccounts(accounts []auth.Account) []auth.Account {
+	_, activePath, ok := grok.LoadActiveCredentials()
+	if !ok {
+		return nil
+	}
+	activeFile := filepath.Base(activePath)
+	var out []auth.Account
+	for _, a := range accounts {
+		if !a.Disabled && !a.IsExpired() && a.ID == activeFile {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // Request helper.
@@ -182,6 +289,8 @@ func (t *Tracker) clientAndURL(kind string) (*http.Client, string) {
 		return t.client, t.codexUsageURL
 	case "claude":
 		return t.client, t.claudeUsageURL
+	case "grok":
+		return t.client, t.grokUsageURL
 	default:
 		return t.client, t.claudeTokenURL
 	}
@@ -258,6 +367,73 @@ func (t *Tracker) fetchJSONUsage(account auth.Account, client *http.Client, requ
 		return failedAccount(account, "Usage response did not include quota windows")
 	}
 	return successAccount(account, windows)
+}
+
+// Grok.
+
+func (t *Tracker) fetchGrokUsage(account auth.Account) AccountUsage {
+	t.mu.Lock()
+	resolveToken := t.grokToken
+	t.mu.Unlock()
+	token, authErr := resolveToken()
+	if authErr != nil {
+		return failedAccount(account, authErr.Error())
+	}
+
+	client, endpoint := t.clientAndURL("grok")
+	if _, err := url.Parse(endpoint); err != nil {
+		return failedAccount(account, "Invalid usage endpoint")
+	}
+	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return failedAccount(account, "Invalid usage endpoint")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
+	request.Header.Set("Accept", "application/json")
+
+	data, status, err := doJSON(client, request)
+	if err != nil {
+		return failedAccount(account, errText(err))
+	}
+	// No retry on 401: the bearer resolver refreshes only on local expiry,
+	// so a retry would resend the same rejected token.
+	if status == 401 || status == 403 {
+		return failedAccount(account, fmt.Sprintf("Grok rejected the stored credentials (HTTP %d). Reconnect Grok in Settings.", status))
+	}
+	if status < 200 || status >= 300 {
+		return failedAccount(account, fmt.Sprintf("Grok usage API returned %d", status))
+	}
+	windows := ParseGrokWindows(data)
+	if len(windows) == 0 {
+		return failedAccount(account, "Usage response did not include quota windows")
+	}
+	return successAccount(account, windows)
+}
+
+// Meta.
+
+// fetchMetaUsage reads the local last-observed store only. Meta has no usage
+// endpoint: the 5-hour window and weekly percents arrive as
+// `response.subscription_usage` SSE events that ThinkingProxy sniffs into the
+// store, so unlike the other providers this never touches the network and
+// only the account serving Responses traffic ever gets observations.
+func (t *Tracker) fetchMetaUsage(account auth.Account) AccountUsage {
+	t.mu.Lock()
+	readSnapshot := t.metaSnapshots
+	t.mu.Unlock()
+	snapshot := readSnapshot(account.ID)
+	if snapshot == nil {
+		return failedAccount(account, "No usage observed yet — send a Meta request through DroidProxy")
+	}
+	windows := ParseMetaWindows(*snapshot, time.Now())
+	if len(windows) == 0 {
+		return failedAccount(account, "Stored Meta usage was incomplete")
+	}
+	usage := successAccount(account, windows)
+	observed := snapshot.ObservedAt
+	usage.UpdatedAt = &observed
+	return usage
 }
 
 // Claude.

@@ -114,6 +114,10 @@ func (d *Daemon) State() control.State {
 			}
 			windows = append(windows, cw)
 		}
+		updatedAt := ""
+		if a.UpdatedAt != nil {
+			updatedAt = a.UpdatedAt.Format(time.RFC3339)
+		}
 		usageRows = append(usageRows, control.UsageAccount{
 			Provider:     a.Provider,
 			ProviderName: a.ProviderName,
@@ -121,6 +125,7 @@ func (d *Daemon) State() control.State {
 			Loading:      a.Loading,
 			Error:        a.Error,
 			Windows:      windows,
+			UpdatedAt:    updatedAt,
 		})
 	}
 
@@ -195,10 +200,10 @@ func (d *Daemon) isProviderEnabled(st auth.ServiceType) bool {
 	return prefs.IsProviderEnabled(string(st))
 }
 
-// usageVisible mirrors SettingsView: the quota section shows when Codex or
-// Claude is enabled or has any connected account.
+// usageVisible mirrors SettingsView: the quota section shows when any
+// usage-tracked provider is enabled or has any connected account.
 func (d *Daemon) usageVisible() bool {
-	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude} {
+	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta} {
 		if prefs.IsProviderEnabled(string(st)) || d.authMgr.HasAccounts(st) {
 			return true
 		}

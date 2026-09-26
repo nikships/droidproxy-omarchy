@@ -3,7 +3,7 @@
 ## 1. Launch & Authenticate
 
 1. Install DroidProxy (see the [README](README.md#install)). The installer starts it and adds the DroidProxy icon to the Omarchy bar.
-2. Click the DroidProxy icon in the bar and choose **Open Settings**. You can also run `droidproxy open`, or search for "DroidProxy" in the Omarchy app launcher.
+2. Click the DroidProxy icon in the bar to open Settings in your browser. You can also run `droidproxy open`, or search for "DroidProxy" in the Omarchy app launcher.
 3. Click **Add Account** next to Claude Code, Codex, Antigravity (Gemini), Kimi, Meta Muse (device-code sign-in), Junie (API key), or **Grok** (device-code browser login). Browser sign-ins open in your default browser.
 
 From a terminal you can do the same with `droidproxy login <provider>` (for example `droidproxy login claude`).

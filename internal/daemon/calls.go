@@ -17,6 +17,7 @@ import (
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
 	"github.com/nikships/droidproxy-omarchy/internal/paths"
 	"github.com/nikships/droidproxy-omarchy/internal/prefs"
+	"github.com/nikships/droidproxy-omarchy/internal/webui"
 )
 
 // authResultTitle is the dialog title the macOS app used for every
@@ -84,6 +85,12 @@ func (d *Daemon) Call(ctx context.Context, method string, params json.RawMessage
 		}
 		if err := desktop.OpenPath(paths.BackendLogsDir()); err != nil {
 			return control.Fail("Could not open the folder: " + err.Error())
+		}
+		return control.OK("")
+
+	case "open.webui":
+		if err := desktop.OpenURL(webui.URL()); err != nil {
+			return control.Fail("Could not open the settings page: " + err.Error())
 		}
 		return control.OK("")
 

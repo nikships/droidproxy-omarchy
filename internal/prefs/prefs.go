@@ -206,7 +206,8 @@ func SequentialAccountFailover() bool {
 func AutoCheckUpdates() bool   { return Shared().Bool(KeyAutoCheckUpdates, true) }
 func AutoInstallUpdates() bool { return Shared().Bool(KeyAutoInstallUpdates, false) }
 
-// BackgroundOpacity is the settings panel background opacity (0.10–1.0).
+// BackgroundOpacity is the legacy QML panel background opacity (0.10–1.0).
+// The web UI is always OLED black and ignores it.
 func BackgroundOpacity() float64 {
 	return Shared().Float(KeyBackgroundOpacity, DefaultBackgroundOpacity)
 }

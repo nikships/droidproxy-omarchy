@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>DroidProxy</title>
+  <link rel="icon" href="/icons/icon-active.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <div class="brand">
+        <img class="mark" src="/icons/icon-active.png" alt="" width="30" height="30">
+        <span class="wordmark">DroidProxy</span>
+        <span class="version-chip" id="versionChip" hidden></span>
+      </div>
+      <button class="status-pill stopped" id="serverPill" title="Toggle server">
+        <span class="status-dot"></span>
+        <span id="serverPillText">Stopped</span>
+      </button>
+    </header>
+
+    <div class="offline-banner" id="offlineBanner">
+      Lost connection to DroidProxy — retrying…
+    </div>
+
+    <main id="app"></main>
+
+    <footer class="footer">
+      <div id="footerLine"></div>
+      <div>© 2026 DroidProxy</div>
+      <div class="btn-row">
+        <button class="btn" id="issueBtn">Report an issue</button>
+        <button class="btn ghost" id="quitBtn">Quit DroidProxy</button>
+      </div>
+    </footer>
+  </div>
+
+  <div class="overlay" id="overlay">
+    <div class="dialog" role="dialog" aria-modal="true">
+      <h2 id="dialogTitle">DroidProxy</h2>
+      <p id="dialogMessage"></p>
+      <input class="field" id="dialogInput" hidden>
+      <div class="dialog-actions" id="dialogActions"></div>
+    </div>
+  </div>
+
+  <div class="toast-wrap"><div class="toast" id="toast"></div></div>
+  <div class="gauge-tip" id="gaugeTip"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -329,6 +329,12 @@ func (s *CredentialStore) AuthAccounts() []auth.Account {
 	return out
 }
 
+// APIKeyExpiredAt reports whether a Model API key with the given unix-seconds
+// expiry is expired at now.
+func APIKeyExpiredAt(expiresAt float64, now time.Time) bool {
+	return !timeFromSeconds(expiresAt).After(now)
+}
+
 // UsableAPIKeys returns the API keys of enabled accounts whose key has not
 // expired at now, in stored order.
 func UsableAPIKeys(accounts []Account, now time.Time) []string {

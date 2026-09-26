@@ -5,8 +5,8 @@ import qs.Commons
 
 // Headless singleton: owns the `ctl watch` process, the parsed dpState snapshot,
 // one-shot `ctl call` processes, and the "droidproxy" IPC target. The bar
-// widget and settings panel read dpState from here (injected as `service`)
-// instead of each running their own watcher.
+// widget reads dpState from here (injected as `service`). Settings live in
+// the browser (the daemon's web UI); results surface there, not in the shell.
 Item {
     id: root
 
@@ -115,8 +115,9 @@ Item {
         return proc
     }
 
-    // call() plus the standard result-dialog surfacing: any non-empty
-    // message/error from the daemon ends up in the settings panel's dialog.
+    // call() plus result surfacing: any non-empty message/error is emitted
+    // on resultArrived (the web UI shows its own dialogs for the calls it
+    // makes directly; the bar widget only fires and forgets).
     function callNotify(method, params) {
         root.call(method, params, function(result) {
             if (result && ((result.message && result.message !== "") || (result.error && result.error !== "")))
@@ -164,35 +165,16 @@ Item {
     IpcHandler {
         target: "droidproxy"
 
+        // Settings live in the browser now (the daemon's open.webui action);
+        // this kept the old `openSettings` name working for existing callers.
         function openSettings(): string {
-            if (!root.shell) return "no-shell"
-            return root.shell.summon(root.pluginId, "{}") ? "ok" : "unknown"
-        }
-
-        function closeSettings(): string {
-            if (!root.shell) return "no-shell"
-            root.shell.hide(root.pluginId)
+            root.callNotify("open.webui")
             return "ok"
         }
 
-        function toggleSettings(): string {
-            if (!root.shell) return "no-shell"
-            root.shell.toggle(root.pluginId, "{}")
+        function openWebUI(): string {
+            root.callNotify("open.webui")
             return "ok"
-        }
-
-        function toggleMenu(): string {
-            if (!root.shell || !root.shell.bar) return "no-bar"
-            if (root.shell.bar.isBarWidgetOpen(root.pluginId))
-                root.shell.bar.hideBarWidget(root.pluginId)
-            else
-                root.shell.bar.summonBarWidget(root.pluginId)
-            return "ok"
-        }
-
-        function openMenu(): string {
-            if (!root.shell || !root.shell.bar) return "no-bar"
-            return root.shell.bar.summonBarWidget(root.pluginId) ? "ok" : "unknown"
         }
 
         function ping(): string {

@@ -31,6 +31,7 @@ import (
 	"github.com/nikships/droidproxy-omarchy/internal/proxy"
 	"github.com/nikships/droidproxy-omarchy/internal/updater"
 	"github.com/nikships/droidproxy-omarchy/internal/usage"
+	"github.com/nikships/droidproxy-omarchy/internal/webui"
 )
 
 // ProxyPort is the user-facing proxy port (ThinkingProxy).
@@ -71,6 +72,7 @@ type Daemon struct {
 	metaAuth  *meta.AuthManager
 	updater   *updater.Updater
 	server    *control.Server
+	web       *webui.Server
 
 	monitor *auth.DirectoryMonitor
 
@@ -134,6 +136,7 @@ func (d *Daemon) run() error {
 	})
 
 	d.server = control.NewServer(d)
+	d.web = webui.NewServer(d)
 	d.wireEvents()
 
 	d.authMgr.CheckAuthStatus()
@@ -152,9 +155,15 @@ func (d *Daemon) run() error {
 	d.updater.StartScheduled(d.ctx)
 
 	// The control API comes up last: once it answers, clients expect every
-	// action to work.
+	// action to work. The settings web UI serves alongside it; a UI bind
+	// failure is logged but not fatal (the proxy itself still works).
 	apiErr := make(chan error, 1)
 	go func() { apiErr <- d.server.ListenAndServe(d.ctx, "") }()
+	go func() {
+		if err := d.web.ListenAndServe(d.ctx); err != nil {
+			logx.Logf("[Daemon] Settings web UI failed to start: %v", err)
+		}
+	}()
 
 	select {
 	case <-d.ctx.Done():
@@ -178,6 +187,7 @@ func (d *Daemon) shutdown() {
 	d.proxy.Stop()
 	d.backend.Stop()
 	_ = d.server.Close()
+	_ = d.web.Close()
 }
 
 // wireEvents bridges the in-process event bus (the NotificationCenter
@@ -186,6 +196,7 @@ func (d *Daemon) wireEvents() {
 	events.Subscribe(events.ServerStatusChanged, d.notifyStateChanged)
 	events.Subscribe(events.AuthDirectoryChanged, d.onAuthDirectoryChanged)
 	events.Subscribe(events.MetaAccountsChanged, d.onMetaAccountsChanged)
+	events.Subscribe(events.MetaUsageChanged, d.onMetaUsageChanged)
 	events.Subscribe(events.PrefsChanged, d.notifyStateChanged)
 	d.authMgr.SetOnChange(d.onAuthStateChanged)
 	d.metaAuth.SetOnChange(func() {
@@ -222,6 +233,15 @@ func (d *Daemon) onMetaAccountsChanged() {
 	d.notifyStateChanged()
 }
 
+// onMetaUsageChanged refreshes just the Meta usage cards from the local
+// last-observed store. ThinkingProxy publishes this whenever it sniffs a new
+// `response.subscription_usage` event, so Meta quota updates live without
+// refetching the other providers.
+func (d *Daemon) onMetaUsageChanged() {
+	d.usage.UpdateMetaAccounts(d.authMgr.Accounts(auth.Meta))
+	d.notifyStateChanged()
+}
+
 func (d *Daemon) onAuthStateChanged() {
 	d.invalidateFactory()
 	if sig := d.usageSignature(); sig != d.usageSig {
@@ -233,17 +253,22 @@ func (d *Daemon) onAuthStateChanged() {
 	d.notifyStateChanged()
 }
 
-// usageSignature mirrors SettingsView.codexUsageAccountSignature: enabled,
-// unexpired Codex and Claude account ids. Only a change here refreshes the
-// quota tracker.
+// usageSignature mirrors SettingsView.codexUsageAccountSignature, extended to
+// every usage-tracked provider: enabled, unexpired Codex, Claude, and Grok
+// account ids plus enabled Meta ids (Meta ignores key expiry). Only a change
+// here refreshes the quota tracker.
 func (d *Daemon) usageSignature() string {
 	var parts []string
-	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude} {
+	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta} {
 		var ids []string
 		for _, a := range d.authMgr.Accounts(st) {
-			if !a.Disabled && !a.IsExpired() {
-				ids = append(ids, a.ID)
+			if a.Disabled {
+				continue
 			}
+			if st != auth.Meta && a.IsExpired() {
+				continue
+			}
+			ids = append(ids, a.ID)
 		}
 		sort.Strings(ids)
 		parts = append(parts, strings.Join(ids, "|"))
@@ -254,7 +279,9 @@ func (d *Daemon) usageSignature() string {
 func (d *Daemon) refreshUsage() {
 	codex := d.authMgr.Accounts(auth.Codex)
 	claudeAccounts := d.authMgr.Accounts(auth.Claude)
-	go d.usage.Refresh(codex, claudeAccounts)
+	grokAccounts := d.authMgr.Accounts(auth.Grok)
+	metaAccounts := d.authMgr.Accounts(auth.Meta)
+	go d.usage.Refresh(codex, claudeAccounts, grokAccounts, metaAccounts)
 }
 
 func (d *Daemon) metaKeyRefreshLoop() {
@@ -361,13 +388,19 @@ func (d *Daemon) notifyStateChanged() {
 	if d.server != nil {
 		d.server.NotifyStateChanged()
 	}
+	if d.web != nil {
+		d.web.NotifyStateChanged()
+	}
 }
 
 // postMessageEvent broadcasts an async result to control API clients (the
-// macOS app's "Authentication Result" alerts).
+// macOS app's "Authentication Result" alerts) and web UI browsers.
 func (d *Daemon) postMessageEvent(title, body, level string) {
 	if d.server != nil {
 		d.server.PostMessage(title, body, level)
+	}
+	if d.web != nil {
+		d.web.PostMessage(title, body, level)
 	}
 }
 

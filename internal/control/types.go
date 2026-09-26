@@ -154,6 +154,9 @@ type UsageAccount struct {
 	Loading      bool          `json:"loading"`
 	Error        string        `json:"error"`
 	Windows      []UsageWindow `json:"windows"`
+	// UpdatedAt is the last successful fetch (RFC 3339), or "" when never
+	// fetched. Meta cards carry the last-observed time instead ("as of").
+	UpdatedAt string `json:"updatedAt"`
 }
 
 type UsageWindow struct {

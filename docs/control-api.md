@@ -4,6 +4,9 @@ The `droidproxy serve` daemon exposes a local control API. The Omarchy shell
 plugin, the `droidproxy` CLI, and scripts all use it. It replaces the macOS
 app's in-process calls between `AppDelegate`, `SettingsView`, and the managers.
 
+The settings web app (what the bar icon opens) talks to the same daemon over
+plain localhost HTTP instead — see [Settings web UI](#settings-web-ui).
+
 ## Transport
 
 - HTTP/1.1 over a Unix socket at `$XDG_RUNTIME_DIR/droidproxy/control.sock`.
@@ -13,6 +16,21 @@ app's in-process calls between `AppDelegate`, `SettingsView`, and the managers.
 - `GET  /v1/events` streams newline-delimited JSON (NDJSON) [events](#events).
 - `POST /v1/call/<method>` runs an [action](#actions). The body is a JSON
   object of parameters (may be empty `{}`).
+
+## Settings web UI
+
+The daemon also serves the settings web app on `http://127.0.0.1:8320`
+(loopback only — remote-management settings never apply to it). The port is
+fixed; a bind failure is logged but does not stop the daemon.
+
+- `GET  /` serves the embedded single-page app (plus `/app.js`,
+  `/styles.css`, `/icons/*`).
+- `GET  /api/state` returns the current [state snapshot](#state-snapshot).
+- `GET  /api/events` streams server-sent events with the same
+  [events](#events) payloads as JSON `data:` frames (plus `: ping` heartbeats).
+- `POST /api/call/<method>` runs an [action](#actions).
+
+The bar icon (`open.webui`) and `droidproxy open` both `xdg-open` this URL.
 
 ## CLI wrapper (what the QML plugin uses)
 
@@ -127,7 +145,7 @@ All keys are always present. Strings are never `null`; use `""`.
     "verificationUrl": ""
   },
   "usage": {
-    "visible": true,               // codex/claude enabled or has accounts
+    "visible": true,               // a tracked provider enabled or has accounts
     "refreshing": false,
     "accounts": [
       {
@@ -138,7 +156,8 @@ All keys are always present. Strings are never `null`; use `""`.
         "error": "",
         "windows": [
           { "title": "5-hour", "remainingPercent": 72.5, "hasRemaining": true, "resetText": "Resets in 2h 10m" }
-        ]
+        ],
+        "updatedAt": "2026-09-26T01:00:00Z"   // last fetch; Meta cards carry the last-observed time ("as of")
       }
     ]
   },
@@ -167,6 +186,7 @@ All keys are always present. Strings are never `null`; use `""`.
 | `server.restart` | – | Stop then start. |
 | `server.copyUrl` | – | Copy `server.url` with `wl-copy`, then notify "Copied". |
 | `open.dashboard` | – | `xdg-open` the management dashboard. |
+| `open.webui` | – | `xdg-open` the settings web app (`http://127.0.0.1:8320`). |
 | `open.authFolder` | – | `xdg-open ~/.cli-proxy-api`. |
 | `open.logsFolder` | – | Create and `xdg-open ~/.cli-proxy-api/logs`. |
 | `open.url` | `{"url"}` | `xdg-open` an http(s) URL (verification links, footer links). |
@@ -191,7 +211,8 @@ All keys are always present. Strings are never `null`; use `""`.
 | `launchAtLogin` | bool | `systemctl --user enable/disable droidproxy.service` |
 | `allowRemote`, `secretKey`, `bindAddress`, `verboseLogging` | bool/string | Regenerate merged config (CLIProxyAPI hot-reloads). |
 | `sequentialAccountFailover` | bool | `setSequentialAccountFailover` (regenerate config). |
-| `beta`, `oledTheme`, `backgroundOpacity` | bool/number | Stored; panel appearance and beta-gated rows. |
+| `beta` | bool | Stored; beta-gated rows (bind address). |
+| `oledTheme`, `backgroundOpacity` | bool/number | Stored; legacy QML panel appearance (the web UI is always OLED black). |
 | `gpt6AstraFastMode`, `gpt6SolFastMode`, `gpt6LunaFastMode` | bool | ThinkingProxy fast mode. |
 | `metaContributorMode` | bool | Stored; affects Factory model apply. |
 | `autoCheckUpdates`, `autoInstallUpdates` | bool | Updater behavior. |

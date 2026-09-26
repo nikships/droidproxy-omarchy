@@ -3,9 +3,12 @@ package usage
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/nikships/droidproxy-omarchy/internal/meta"
 )
 
 // knownClaudeBuckets are the Claude usage buckets we surface, in display
@@ -55,6 +58,95 @@ func ParseClaudeWindows(data []byte) []Window {
 		windows = append(windows, newWindow(bucket.title, &usedPercent, resetText, resetDate))
 	}
 	return windows
+}
+
+// ParseGrokWindows parses the SuperGrok pooled credit window
+// (cli-chat-proxy.grok.com/v1/billing?format=credits). SuperGrok reports one
+// window per billing period: creditUsagePercent when present, otherwise
+// onDemandUsed/onDemandCap. The title comes from currentPeriod.type.
+func ParseGrokWindows(data []byte) []Window {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	config, ok := raw["config"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	var usedPercent float64
+	if credit, ok := numberValue(config["creditUsagePercent"]); ok {
+		usedPercent = credit
+	} else if capDict, ok := config["onDemandCap"].(map[string]any); ok {
+		cap, capOK := numberValue(capDict["val"])
+		usedDict, _ := config["onDemandUsed"].(map[string]any)
+		used, usedOK := numberValue(usedDict["val"])
+		if !capOK || !usedOK || cap <= 0 {
+			return nil
+		}
+		usedPercent = used / cap * 100
+	} else {
+		return nil
+	}
+	if usedPercent < 0 {
+		usedPercent = 0
+	}
+	if usedPercent > 100 {
+		usedPercent = 100
+	}
+
+	period, _ := config["currentPeriod"].(map[string]any)
+	title := "Credits"
+	if period != nil {
+		switch period["type"] {
+		case "USAGE_PERIOD_TYPE_WEEKLY":
+			title = "Weekly"
+		case "USAGE_PERIOD_TYPE_MONTHLY":
+			title = "Monthly"
+		}
+	}
+
+	var resetString string
+	if period != nil {
+		resetString, _ = period["end"].(string)
+	}
+	if resetString == "" {
+		resetString, _ = config["billingPeriodEnd"].(string)
+	}
+	resetDate := parseISO8601Date(resetString)
+	resetText := resetString
+	if resetDate != nil {
+		resetText = ResetTextFor(*resetDate)
+	}
+	return []Window{newWindow(title, &usedPercent, resetText, resetDate)}
+}
+
+// ParseMetaWindows renders a last-observed Meta usage snapshot as the 5-hour
+// window plus the weekly window. Both reset texts carry the "as of" stamp,
+// matching `muse /usage` semantics.
+func ParseMetaWindows(snapshot meta.UsageSnapshot, now time.Time) []Window {
+	observed := relativeTimeString(snapshot.ObservedAt, now)
+	shortTitle := MetaWindowTitle(snapshot.WindowDurationMins)
+	shortReset := ResetTextForAt(snapshot.WindowResetsAt, now) + " · as of " + observed
+	weeklyReset := ResetTextForAt(snapshot.WeeklyResetsAt, now) + " · as of " + observed
+	shortUsed := snapshot.WindowUsedPercent
+	weeklyUsed := snapshot.WeeklyUsedPercent
+	return []Window{
+		newWindow(shortTitle, &shortUsed, shortReset, &snapshot.WindowResetsAt),
+		newWindow("Weekly", &weeklyUsed, weeklyReset, &snapshot.WeeklyResetsAt),
+	}
+}
+
+// MetaWindowTitle names the short Meta window from its duration in minutes
+// ("5-hour" for the standard 300-minute window).
+func MetaWindowTitle(minutes float64) string {
+	if minutes <= 0 {
+		return "Window"
+	}
+	if math.Mod(minutes, 60) == 0 {
+		return fmt.Sprintf("%d-hour", int(minutes/60))
+	}
+	return fmt.Sprintf("%d-min", int(math.Round(minutes)))
 }
 
 // parseCodexWindows parses the Codex backend usage payload, falling back to a
@@ -253,7 +345,13 @@ func parseISO8601Date(s string) *time.Time {
 // RelativeDateTimeFormatter + medium-date/short-time pair, e.g.
 // "in 2 hours (Jun 5, 2026 at 1:00 PM)".
 func ResetTextFor(date time.Time) string {
-	return relativeTimeString(date, time.Now()) + " (" + date.Format("Jan 2, 2006 at 3:04 PM") + ")"
+	return ResetTextForAt(date, time.Now())
+}
+
+// ResetTextForAt is ResetTextFor with an explicit "now" (tests and the Meta
+// "as of" rendering).
+func ResetTextForAt(date, now time.Time) string {
+	return relativeTimeString(date, now) + " (" + date.Format("Jan 2, 2006 at 3:04 PM") + ")"
 }
 
 func relativeTimeString(date, now time.Time) string {

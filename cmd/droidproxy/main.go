@@ -22,6 +22,7 @@ import (
 	"github.com/nikships/droidproxy-omarchy/internal/desktop"
 	"github.com/nikships/droidproxy-omarchy/internal/installer"
 	"github.com/nikships/droidproxy-omarchy/internal/paths"
+	"github.com/nikships/droidproxy-omarchy/internal/webui"
 )
 
 func main() {
@@ -81,7 +82,7 @@ usage: droidproxy <command> [args]
   ctl call <method> [json]  run one action, e.g. droidproxy ctl call server.toggle
   status                    human-readable summary of the daemon state
   start | stop | restart    control the droidproxy systemd user service
-  open                      open the DroidProxy settings panel in the shell
+  open                      open the DroidProxy settings page in the browser
   login <provider>          start a provider sign-in flow
   update [check|install]    check for updates, or install the available one
   rollback                  switch back to the previous version
@@ -271,7 +272,9 @@ func cmdOpen(args []string) error {
 			return fmt.Errorf("could not start the service: %w", err)
 		}
 	}
-	return desktop.DroidProxyIPC("openSettings")
+	// The settings live in the browser now: the bar icon and the launcher
+	// entry both land here.
+	return desktop.OpenURL(webui.URL())
 }
 
 func cmdLogin(args []string) error {

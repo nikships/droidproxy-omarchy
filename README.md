@@ -8,7 +8,7 @@
   <strong>Your Claude, Codex, Gemini, Grok, and Meta Muse subscriptions — on Omarchy, for <a href="https://app.factory.ai"><img src="factory-logo.svg" alt="Factory.ai" height="16"></a> Droids.</strong>
 </p>
 
-A native Linux port of [DroidProxy](https://github.com/anand-92/droidproxy) for [Omarchy](https://omarchy.org). Background service, Omarchy bar icon, settings panel. Built on [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
+A native Linux port of [DroidProxy](https://github.com/anand-92/droidproxy) for [Omarchy](https://omarchy.org). Background service, Omarchy bar icon, settings web app. Built on [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
 <p align="center">
   <img src="droidproxy-simplifier.gif" alt="DroidProxy" width="720">
@@ -43,12 +43,12 @@ droidproxy uninstall --purge  # also removes DroidProxy's settings
 
 ## Features
 
-- **One-click OAuth auth** -- Claude Code, Codex, and Antigravity login from the Settings panel, with credential monitoring and automatic OAuth token refresh. Multiple accounts per provider, with per-account enable/disable.
+- **One-click OAuth auth** -- Claude Code, Codex, and Antigravity login from Settings, with credential monitoring and automatic OAuth token refresh. Multiple accounts per provider, with per-account enable/disable.
 - **Grok and Meta Muse** -- Device-code sign-in for SuperGrok / X Premium+ (Grok 4.7 and Grok 4.7 Fast) and Meta Muse (Muse Spark 1.3, with Contributor mode).
 - **Every model, every reasoning level** -- Fable 5.1, Opus 5.5, Sonnet 4.6, GPT 6 Astra, GPT 6 Sol, GPT 6 Luna, Gemini 3.1 Pro, Gemini 3 Flash, and more — registered as Factory custom models with their full set of native reasoning levels. Pick the effort per session in Droid's model selector.
 - **Fast Mode** -- Optional `service_tier=priority` for GPT 6 Astra, GPT 6 Sol, and GPT 6 Luna. Grok 4.7 Fast is a separate SuperGrok model (`grok-4.7-build-fast`).
 - **Account failover** -- Round-robin by default, or sequential failover that rides one account until its quota runs out.
-- **Usage tracking** -- Claude and Codex OAuth quota windows (5-hour + weekly) in the Settings panel.
+- **Usage tracking** -- Claude, Codex, Grok, and Meta Muse OAuth quota windows (5-hour + weekly) as ring gauges in the Settings web app, just like the Mac app.
 - **Grok Imagine and GPT Image** -- OpenAI-compatible image generation through your Grok or Codex subscription. See [Image generation skills](#image-generation-skills).
 - **Remote access** -- Optional remote management with a secret key, and a configurable bind address (beta).
 
@@ -58,8 +58,8 @@ droidproxy uninstall --purge  # also removes DroidProxy's settings
 
 ## Using it
 
-- **Bar icon** -- click for the quick menu (server status, start/stop, copy the server URL, open the CLIProxyAPI dashboard, check for updates, quit).
-- **Settings** -- quick menu → **Open Settings**, the launcher entry, or `droidproxy open`.
+- **Bar icon** -- click to open the Settings web app (`http://127.0.0.1:8320`). The icon tint shows the server state.
+- **Settings** -- the bar icon, the launcher entry, or `droidproxy open`. Server control, provider accounts, OAuth quota gauges, Factory models, remote access, and updates.
 - **Factory models** -- Settings → **Factory custom models → Apply** writes DroidProxy's models into `~/.factory/settings.json` (timestamped backup first). In Droid, use `/model` and search for "DroidProxy:".
 
 See [SETUP.md](SETUP.md) for provider details and manual Factory configuration. **(OR use the 1-click options in the UI!)**
@@ -69,7 +69,7 @@ See [SETUP.md](SETUP.md) for provider details and manual Factory configuration. 
 ```
 droidproxy status              show server and provider status
 droidproxy start|stop|restart  control the proxy servers
-droidproxy open                open the Settings panel
+droidproxy open                open the Settings web app
 droidproxy login <provider>    add an account (claude, codex, antigravity, grok, meta)
 droidproxy update [check|install]
 droidproxy rollback            go back to the previously installed version
@@ -84,7 +84,7 @@ Droid ──► :8317 ThinkingProxy ──► :8318 CLIProxyAPI ──► provid
                     └──► api.x.ai / cli-chat-proxy.grok.com / api.meta.ai (Grok, Muse Responses)
 ```
 
-- `droidproxy serve` runs as a systemd user service. ThinkingProxy on `localhost:8317`, bundled CLIProxyAPI on `127.0.0.1:8318`.
+- `droidproxy serve` runs as a systemd user service. ThinkingProxy on `localhost:8317`, bundled CLIProxyAPI on `127.0.0.1:8318`, settings web app on `127.0.0.1:8320`.
 - The Omarchy shell plugin talks to the service over a private Unix socket (`$XDG_RUNTIME_DIR/droidproxy/control.sock`). See [docs/control-api.md](docs/control-api.md).
 - Service logs: `journalctl --user -u droidproxy`. Per-request reasoning log: `~/.local/state/droidproxy/droidproxy-debug.log`.
 

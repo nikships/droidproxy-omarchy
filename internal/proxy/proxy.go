@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
+	"github.com/nikships/droidproxy-omarchy/internal/meta"
 	"github.com/nikships/droidproxy-omarchy/internal/prefs"
 )
 
@@ -48,6 +49,9 @@ type Proxy struct {
 	GrokAccessToken func() (string, error)
 	// MetaAPIKey returns the first usable Muse Model API key.
 	MetaAPIKey func() (string, bool)
+	// MetaUsageRecorder records a sniffed Meta usage snapshot. Defaults to
+	// the shared usage store; tests inject a stub.
+	MetaUsageRecorder func(accountID string, snapshot meta.UsageSnapshot)
 
 	mu       sync.Mutex
 	listener net.Listener

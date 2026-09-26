@@ -113,7 +113,7 @@ func (p *Proxy) sendGrokUpstream(method, path, version string, headers [][2]stri
 }
 
 func (p *Proxy) forwardToMeta(method, path, version string, headers [][2]string, body string, client net.Conn) {
-	apiKey, ok := p.resolveMetaAPIKey()
+	apiKey, accountID, ok := p.resolveMetaServingAccount()
 	if !ok {
 		logx.Logf("[ThinkingProxy] Error: No active Meta Muse API key found")
 		sendError(client, 401, "No active Meta Muse API key found. Connect Meta Muse in DroidProxy settings.")
@@ -148,18 +148,71 @@ func (p *Proxy) forwardToMeta(method, path, version string, headers [][2]string,
 		logx.Logf("[ThinkingProxy] Send error to %s: %v", host, err)
 		return
 	}
-	p.relayUpstreamResponse(target, client, "Meta", false)
+	p.relayMetaResponse(target, client, accountID)
 }
 
-func (p *Proxy) resolveMetaAPIKey() (string, bool) {
+// resolveMetaServingAccount returns the API key and account id of the first
+// usable Meta account. Responses TLS-forward uses one key (no per-request
+// failover on this path); Completions fail over through CLIProxyAPI instead.
+func (p *Proxy) resolveMetaServingAccount() (apiKey, accountID string, ok bool) {
 	if p.MetaAPIKey != nil {
-		return p.MetaAPIKey()
+		key, keyOK := p.MetaAPIKey()
+		if !keyOK {
+			return "", "", false
+		}
+		return key, "", true
 	}
-	keys := meta.UsableAPIKeys(meta.Shared().Accounts(), time.Now())
-	if len(keys) == 0 {
-		return "", false
+	now := time.Now()
+	for _, a := range meta.Shared().Accounts() {
+		if a.Disabled || a.Credentials.APIKey == "" {
+			continue
+		}
+		if meta.APIKeyExpiredAt(a.Credentials.APIKeyExpiresAt, now) {
+			continue
+		}
+		return a.Credentials.APIKey, a.ID, true
 	}
-	return keys[0], true
+	return "", "", false
+}
+
+// relayMetaResponse streams the Meta upstream response to the client while
+// sniffing `response.subscription_usage` SSE events into the Meta usage
+// store. Relayed bytes pass through unchanged; only the serving account ever
+// gets observations.
+func (p *Proxy) relayMetaResponse(target, client net.Conn, accountID string) {
+	record := p.MetaUsageRecorder
+	if record == nil {
+		record = func(id string, snapshot meta.UsageSnapshot) {
+			meta.SharedUsageStore().Record(id, snapshot)
+		}
+	}
+	pending := ""
+	now := time.Now()
+	buf := make([]byte, readChunkSize)
+	for {
+		n, err := target.Read(buf)
+		if n > 0 {
+			if accountID != "" {
+				var snapshots []meta.UsageSnapshot
+				pending, snapshots = meta.ScanUsageChunk(buf[:n], pending, now)
+				for _, snapshot := range snapshots {
+					record(accountID, snapshot)
+					logx.Debugf("META USAGE: window=%.0f%% weekly=%.0f%%",
+						snapshot.WindowUsedPercent, snapshot.WeeklyUsedPercent)
+				}
+			}
+			if _, werr := client.Write(buf[:n]); werr != nil {
+				logx.Logf("[ThinkingProxy] Send Meta response error: %v", werr)
+				return
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				logx.Logf("[ThinkingProxy] Receive Meta response error: %v", err)
+			}
+			return
+		}
+	}
 }
 
 func (p *Proxy) relayUpstreamResponse(target, client net.Conn, label string, rewriteGrokNativeToolCalls bool) {
