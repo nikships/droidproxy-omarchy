@@ -39,6 +39,9 @@ type fakeDesktop struct {
 	runs      []string
 	detached  []string
 	clipboard []string
+	// clipboardFails makes every wl-copy run fail, like a session without
+	// a reachable clipboard.
+	clipboardFails bool
 }
 
 func (f *fakeDesktop) Run(_ context.Context, name string, args ...string) (string, error) {
@@ -68,6 +71,9 @@ func (f *fakeDesktop) Run(_ context.Context, name string, args ...string) (strin
 		return "", nil
 	}
 	if name == "wl-copy" && len(args) >= 1 {
+		if f.clipboardFails {
+			return "", errors.New("wl-copy: no display")
+		}
 		f.clipboard = append(f.clipboard, args[0])
 	}
 	return "", nil
@@ -173,7 +179,7 @@ func startTestDaemon(t *testing.T) (*control.Client, *fakeDesktop) {
 	backend.PgrepPath, backend.PkillPath = "/bin/true", "/bin/true"
 	t.Cleanup(func() { backend.PgrepPath, backend.PkillPath = oldPgrep, oldPkill })
 	oldFactory := proxyFactory
-	proxyFactory = func() proxyServer { return &fakeProxy{} }
+	proxyFactory = func(*Daemon) proxyServer { return &fakeProxy{} }
 	t.Cleanup(func() { proxyFactory = oldFactory })
 	events.Reset()
 	t.Cleanup(events.Reset)
@@ -337,6 +343,24 @@ func TestDaemonSettingsAndDesktopActions(t *testing.T) {
 		t.Errorf("clipboard = %v", texts)
 	}
 
+	if res := callOK(t, client, "usage.copyCurl", map[string]any{"provider": "codex", "accountId": "codex-a@b.com.json"}); !res.OK {
+		t.Fatalf("usage.copyCurl = %+v", res)
+	}
+	wantCurl := "curl -s 'http://127.0.0.1:8317/droidproxy/usage?provider=codex&account=codex-a@b.com.json'"
+	if texts := desk.clipboardTexts(); len(texts) == 0 || texts[len(texts)-1] != wantCurl {
+		t.Errorf("clipboard = %v, want %s", texts, wantCurl)
+	}
+	// The web UI shows its checkmark and toast only for an ok result.
+	desk.mu.Lock()
+	desk.clipboardFails = true
+	desk.mu.Unlock()
+	if res := callOK(t, client, "usage.copyCurl", map[string]any{"provider": "codex", "accountId": "codex-a@b.com.json"}); res.OK || res.Error == "" {
+		t.Errorf("usage.copyCurl with a failing clipboard = %+v", res)
+	}
+	desk.mu.Lock()
+	desk.clipboardFails = false
+	desk.mu.Unlock()
+
 	if res := callOK(t, client, "open.url", map[string]any{"url": "https://github.com/router-for-me/CLIProxyAPI"}); !res.OK {
 		t.Fatalf("open.url = %+v", res)
 	}
@@ -352,6 +376,19 @@ func TestDaemonSettingsAndDesktopActions(t *testing.T) {
 
 	if res := callOK(t, client, "open.url", map[string]any{"url": "file:///etc/passwd"}); res.OK {
 		t.Error("open.url must reject non-http(s) URLs")
+	}
+	if res := callOK(t, client, "settings.set", map[string]any{"key": "windowPrimerEnabled.codex", "value": true}); !res.OK {
+		t.Fatalf("settings.set windowPrimerEnabled.codex = %+v", res)
+	}
+	if res := callOK(t, client, "settings.set", map[string]any{"key": "windowPrimerMinutes.codex", "value": 450}); !res.OK {
+		t.Fatalf("settings.set windowPrimerMinutes.codex = %+v", res)
+	}
+	if st, _ := client.State(); !st.Settings.WindowPrimerEnabledCodex || st.Settings.WindowPrimerMinutesCodex != 450 ||
+		st.Settings.WindowPrimerEnabledClaude || st.Settings.WindowPrimerMinutesClaude != 7*60 {
+		t.Errorf("window primer settings = %+v", st.Settings)
+	}
+	if res := callOK(t, client, "settings.set", map[string]any{"key": "windowPrimerMinutes.codex", "value": 24 * 60}); res.OK {
+		t.Error("a time past midnight must fail")
 	}
 	if res := callOK(t, client, "settings.set", map[string]any{"key": "nonsense", "value": true}); res.OK {
 		t.Error("unknown setting must fail")

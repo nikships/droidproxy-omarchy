@@ -8,7 +8,7 @@ import (
 	"github.com/nikships/droidproxy-omarchy/internal/grok"
 )
 
-// Muse Spark is Responses-native. The Muse Code CLI posts /v1/responses with
+// Muse Wonder is Responses-native. The Muse Code CLI posts /v1/responses with
 // reasoning.effort and include: ["reasoning.encrypted_content"] so later turns
 // can resume thinking. CLIProxyAPI's generic openai-compatibility executor
 // translates /v1/responses into /chat/completions (chatcmpl-* ids), which
@@ -46,9 +46,10 @@ func HeadersForForwarding(headers [][2]string) [][2]string {
 	return append(out, [2]string{"User-Agent", nativeUserAgent})
 }
 
-// IsMetaModel reports whether the model is Muse Spark (or a variant).
+// IsMetaModel reports whether the model is a Muse Wonder model (or a variant).
 func IsMetaModel(model string) bool {
-	return model == "muse-spark-1.3" || strings.HasPrefix(model, "muse-spark-1.3-")
+	return model == "muse-wonder-1.0" || strings.HasPrefix(model, "muse-wonder-1.0-") ||
+		model == "muse-wonder-full-1.0" || strings.HasPrefix(model, "muse-wonder-full-1.0-")
 }
 
 // IsResponsesPath reports whether the request path targets a Responses endpoint.

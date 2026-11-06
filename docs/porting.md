@@ -15,7 +15,7 @@ same on-disk formats and credential locations.
 | `NSLog` | `internal/logx.Logf` (done); `/tmp/droidproxy-debug.log` → `logx.Debugf` |
 | `AuthStatus.swift` types | `internal/auth/types.go` (done) |
 | `AuthStatus.swift` manager, `AuthDirectoryMonitor.swift` | `internal/auth` |
-| `ClaudeAnthropicBetaRewriter`, `ClaudeThinkingBlockSanitizer`, `ClaudeAuthSeatFiles` | `internal/claude` |
+| `ClaudeAnthropicBetaRewriter`, `ClaudeAuthSeatFiles` | `internal/claude` |
 | `OAuthUsageTracker.swift` | `internal/usage` |
 | `GrokRequestSanitizer`, `GrokNativeToolCallRewriter`, `GrokEndFeatureRunRepair` | `internal/grok` (transform files) |
 | `GrokAuth.swift` | `internal/grok` (auth files) |

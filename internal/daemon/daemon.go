@@ -28,6 +28,7 @@ import (
 	"github.com/nikships/droidproxy-omarchy/internal/meta"
 	"github.com/nikships/droidproxy-omarchy/internal/notify"
 	"github.com/nikships/droidproxy-omarchy/internal/paths"
+	"github.com/nikships/droidproxy-omarchy/internal/prefs"
 	"github.com/nikships/droidproxy-omarchy/internal/proxy"
 	"github.com/nikships/droidproxy-omarchy/internal/updater"
 	"github.com/nikships/droidproxy-omarchy/internal/usage"
@@ -45,7 +46,11 @@ type proxyServer interface {
 }
 
 // proxyFactory builds the ThinkingProxy. A variable so tests can stub it.
-var proxyFactory func() proxyServer = func() proxyServer { return proxy.New() }
+var proxyFactory = func(d *Daemon) proxyServer {
+	p := proxy.New()
+	p.UsageEndpoint = d.serveUsageEndpoint
+	return p
+}
 
 // Timing constants ported from AppDelegate/SettingsView.
 const (
@@ -124,7 +129,7 @@ func (d *Daemon) run() error {
 	catalog.SetMetaKeyChecker(func() bool { return d.metaStore.HasUsableAPIKey() })
 
 	d.backend = backend.New()
-	d.proxy = proxyFactory()
+	d.proxy = proxyFactory(d)
 
 	d.usage = usage.NewTracker()
 	d.usage.SetOnChange(d.notifyStateChanged)
@@ -152,6 +157,7 @@ func (d *Daemon) run() error {
 		d.metaAuth.RefreshAPIKeyIfNeeded(false, nil)
 	}
 	go d.metaKeyRefreshLoop()
+	go newWindowPrimer(d.sendWindowPrimers).run(d.ctx)
 	d.updater.StartScheduled(d.ctx)
 
 	// The control API comes up last: once it answers, clients expect every
@@ -238,19 +244,33 @@ func (d *Daemon) onMetaAccountsChanged() {
 // `response.subscription_usage` event, so Meta quota updates live without
 // refetching the other providers.
 func (d *Daemon) onMetaUsageChanged() {
-	d.usage.UpdateMetaAccounts(d.authMgr.Accounts(auth.Meta))
+	d.usage.UpdateMetaAccounts(d.usageAccounts(auth.Meta))
 	d.notifyStateChanged()
 }
 
 func (d *Daemon) onAuthStateChanged() {
 	d.invalidateFactory()
+	d.refreshUsageIfAccountsChanged()
+	d.notifyStateChanged()
+}
+
+func (d *Daemon) refreshUsageIfAccountsChanged() {
 	if sig := d.usageSignature(); sig != d.usageSig {
 		d.mu.Lock()
 		d.usageSig = sig
 		d.mu.Unlock()
 		d.refreshUsage()
 	}
-	d.notifyStateChanged()
+}
+
+// usageAccounts is the account list the quota tracker reads for st. A
+// switched-off Grok or Meta provider shows no usage (SettingsView parity);
+// for Meta this also keeps a stale card from spending quota on a probe.
+func (d *Daemon) usageAccounts(st auth.ServiceType) []auth.Account {
+	if (st == auth.Grok || st == auth.Meta) && !prefs.IsProviderEnabled(string(st)) {
+		return nil
+	}
+	return d.authMgr.Accounts(st)
 }
 
 // usageSignature mirrors SettingsView.codexUsageAccountSignature, extended to
@@ -261,7 +281,7 @@ func (d *Daemon) usageSignature() string {
 	var parts []string
 	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta} {
 		var ids []string
-		for _, a := range d.authMgr.Accounts(st) {
+		for _, a := range d.usageAccounts(st) {
 			if a.Disabled {
 				continue
 			}
@@ -277,11 +297,21 @@ func (d *Daemon) usageSignature() string {
 }
 
 func (d *Daemon) refreshUsage() {
-	codex := d.authMgr.Accounts(auth.Codex)
-	claudeAccounts := d.authMgr.Accounts(auth.Claude)
-	grokAccounts := d.authMgr.Accounts(auth.Grok)
-	metaAccounts := d.authMgr.Accounts(auth.Meta)
-	go d.usage.Refresh(codex, claudeAccounts, grokAccounts, metaAccounts)
+	go d.usage.Refresh(d.usageAccounts(auth.Codex), d.usageAccounts(auth.Claude), d.usageAccounts(auth.Grok), d.usageAccounts(auth.Meta))
+}
+
+// serveUsageEndpoint answers ThinkingProxy's GET /droidproxy/usage.
+func (d *Daemon) serveUsageEndpoint(requestPath string) (int, []byte, bool) {
+	filter, ok := usage.ParseEndpointFilter(requestPath)
+	if !ok {
+		return 0, nil, false
+	}
+	accounts := map[auth.ServiceType][]auth.Account{}
+	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta} {
+		accounts[st] = d.authMgr.Accounts(st)
+	}
+	status, body := d.usage.ServeEndpoint(filter, accounts, time.Now())
+	return status, body, true
 }
 
 func (d *Daemon) metaKeyRefreshLoop() {

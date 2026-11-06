@@ -4,6 +4,7 @@ package usage
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"time"
 
@@ -31,6 +32,9 @@ type AccountUsage struct {
 	Error        string     `json:"error"`
 	Windows      []Window   `json:"windows"`
 	UpdatedAt    *time.Time `json:"-"`
+	// RateLimited (HTTP 429) and RetryAfter drive the polling cache backoff.
+	RateLimited bool       `json:"-"`
+	RetryAfter  *time.Time `json:"-"`
 }
 
 // newWindow builds a Window from a used percentage, computing the
@@ -81,6 +85,13 @@ func failedAccount(account auth.Account, message string) AccountUsage {
 		Error:        message,
 		UpdatedAt:    &now,
 	}
+}
+
+func failedResponse(account auth.Account, message string, status int, header http.Header) AccountUsage {
+	usage := failedAccount(account, message)
+	usage.RateLimited = status == http.StatusTooManyRequests
+	usage.RetryAfter = retryAfterDate(header.Get("Retry-After"), time.Now())
+	return usage
 }
 
 // authValues reads the auth file and returns its non-empty string fields.

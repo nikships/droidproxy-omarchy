@@ -17,6 +17,7 @@ import (
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
 	"github.com/nikships/droidproxy-omarchy/internal/paths"
 	"github.com/nikships/droidproxy-omarchy/internal/prefs"
+	"github.com/nikships/droidproxy-omarchy/internal/usage"
 	"github.com/nikships/droidproxy-omarchy/internal/webui"
 )
 
@@ -206,6 +207,19 @@ func (d *Daemon) Call(ctx context.Context, method string, params json.RawMessage
 		d.refreshUsage()
 		return control.OK("")
 
+	case "usage.copyCurl":
+		var p struct {
+			Provider  string `json:"provider"`
+			AccountID string `json:"accountId"`
+		}
+		if !parseParams(params, &p) || p.Provider == "" || p.AccountID == "" {
+			return control.Fail("Invalid parameters.")
+		}
+		if err := desktop.CopyToClipboard(usage.CurlCommand(p.Provider, p.AccountID)); err != nil {
+			return control.Fail("Could not copy: " + err.Error())
+		}
+		return control.OK("")
+
 	case "update.check":
 		go func() {
 			if err := d.updater.Check(d.ctx); err != nil {
@@ -283,6 +297,7 @@ func (d *Daemon) setProviderEnabled(provider string, enabled bool) control.CallR
 		}
 	}
 	d.invalidateFactory()
+	d.refreshUsageIfAccountsChanged()
 	d.notifyStateChanged()
 	return control.OK("")
 }
@@ -525,7 +540,7 @@ func (d *Daemon) startMetaLogin() {
 			d.mu.Unlock()
 			if err == nil {
 				d.postMessageEvent(authResultTitle,
-					"Meta Muse connected.\n\nMuse Spark 1.3 and Muse Spark 1.3 Contributor are now available. Re-apply Factory custom models to pick them up.",
+					"Meta Muse connected.\n\nMuse Wonder 1.0 and Muse Wonder 1.0 Contributor are now available. Re-apply Factory custom models to pick them up.",
 					control.LevelInfo)
 			} else {
 				d.postMessageEvent(authResultTitle, "Meta Muse authentication failed: "+err.Error(), control.LevelError)
@@ -712,8 +727,12 @@ func (d *Daemon) setSetting(key string, value json.RawMessage) control.CallResul
 		if err := setBoolPref(prefs.KeyGPT6AstraFastMode, value); err != nil {
 			return fail(err)
 		}
-	case "gpt6SolFastMode":
-		if err := setBoolPref(prefs.KeyGPT6SolFastMode, value); err != nil {
+	case "gpt61SolFastMode":
+		if err := setBoolPref(prefs.KeyGPT61SolFastMode, value); err != nil {
+			return fail(err)
+		}
+	case "gpt61TerraFastMode":
+		if err := setBoolPref(prefs.KeyGPT61TerraFastMode, value); err != nil {
 			return fail(err)
 		}
 	case "gpt6LunaFastMode":
@@ -726,6 +745,19 @@ func (d *Daemon) setSetting(key string, value json.RawMessage) control.CallResul
 			return fail(err)
 		}
 		d.invalidateFactory()
+
+	case "windowPrimerEnabled.claude", "windowPrimerEnabled.codex", "windowPrimerEnabled.meta":
+		if err := setBoolPref(key, value); err != nil {
+			return fail(err)
+		}
+	case "windowPrimerMinutes.claude", "windowPrimerMinutes.codex", "windowPrimerMinutes.meta":
+		var minutes int
+		if len(value) == 0 || json.Unmarshal(value, &minutes) != nil || minutes < 0 || minutes >= 24*60 {
+			return control.Fail("Invalid value.")
+		}
+		if err := prefs.Shared().Set(key, minutes); err != nil {
+			return fail(err)
+		}
 
 	case "autoCheckUpdates":
 		if err := setBoolPref(prefs.KeyAutoCheckUpdates, value); err != nil {

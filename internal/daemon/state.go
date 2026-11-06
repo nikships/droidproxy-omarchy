@@ -33,9 +33,9 @@ var providerOrder = []providerInfo{
 	{auth.Claude, "icon-claude.png", "#D97757", control.KindStandard, ""},
 	{auth.Codex, "icon-codex.png", "#74AA9C", control.KindStandard, ""},
 	{auth.Meta, "icon-meta.svg", "#0866FF", control.KindMeta, "Add Meta Muse accounts for automatic account failover."},
-	{auth.Antigravity, "icon-gemini.png", "#4285F4", control.KindStandard, "Uses your Antigravity subscription for the Antigravity-backed Gemini, Claude, and GPT-OSS models."},
+	{auth.Antigravity, "icon-gemini.png", "#4285F4", control.KindStandard, "Uses your Antigravity subscription for the Antigravity-backed Gemini and Claude models."},
 	{auth.Kimi, "icon-kimi.svg", "#00BF91", control.KindStandard, ""},
-	{auth.Junie, "icon-junie.svg", "#48E054", control.KindJunie, "Enter your JetBrains Junie API key to use your JetBrains AI subscription for Junie Sonnet 5, Opus 5.5, and Fable 5.1."},
+	{auth.Junie, "icon-junie.svg", "#48E054", control.KindJunie, "Enter your JetBrains Junie API key to use your JetBrains AI subscription for Junie Opus 5.5 and Sol 6.1."},
 	{auth.Grok, "icon-grok.svg", "#1D9BF0", control.KindGrok, "Log in with SuperGrok / X Premium+ to use Grok 4.7 and Grok 4.7 Fast (no xAI API key)."},
 }
 
@@ -119,6 +119,7 @@ func (d *Daemon) State() control.State {
 			updatedAt = a.UpdatedAt.Format(time.RFC3339)
 		}
 		usageRows = append(usageRows, control.UsageAccount{
+			ID:           a.ID,
 			Provider:     a.Provider,
 			ProviderName: a.ProviderName,
 			Email:        a.Email,
@@ -159,9 +160,16 @@ func (d *Daemon) State() control.State {
 			OLEDTheme:                 prefs.OLEDTheme(),
 			BackgroundOpacity:         prefs.BackgroundOpacity(),
 			GPT6AstraFastMode:         prefs.GPT6AstraFastMode(),
-			GPT6SolFastMode:           prefs.GPT6SolFastMode(),
+			GPT61SolFastMode:          prefs.GPT61SolFastMode(),
+			GPT61TerraFastMode:        prefs.GPT61TerraFastMode(),
 			GPT6LunaFastMode:          prefs.GPT6LunaFastMode(),
 			MetaContributorMode:       prefs.MetaContributorMode(),
+			WindowPrimerEnabledClaude: prefs.WindowPrimerEnabled("claude"),
+			WindowPrimerMinutesClaude: prefs.WindowPrimerMinutes("claude"),
+			WindowPrimerEnabledCodex:  prefs.WindowPrimerEnabled("codex"),
+			WindowPrimerMinutesCodex:  prefs.WindowPrimerMinutes("codex"),
+			WindowPrimerEnabledMeta:   prefs.WindowPrimerEnabled("meta"),
+			WindowPrimerMinutesMeta:   prefs.WindowPrimerMinutes("meta"),
 			AutoCheckUpdates:          prefs.AutoCheckUpdates(),
 			AutoInstallUpdates:        prefs.AutoInstallUpdates(),
 		},

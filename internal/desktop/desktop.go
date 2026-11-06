@@ -227,8 +227,8 @@ func DroidProxyIPC(method string, args ...string) error {
 // legacy openSettings alias) and ping.
 func buildinfoPluginTarget() string { return "droidproxy" }
 
-// OpenSettings asks the plugin to open the settings web app. Prefer opening
-// the web UI URL directly (cmdOpen does); this is the shell-IPC path.
+// OpenSettings asks the plugin to open the bar panel. cmdOpen does that
+// through omarchy-shell; --web opens the settings page directly.
 func OpenSettings() error {
 	return DroidProxyIPC("openWebUI")
 }

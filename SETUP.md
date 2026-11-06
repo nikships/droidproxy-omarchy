@@ -14,7 +14,7 @@ For **Grok 4.7** and **Grok 4.7 Fast** (SuperGrok / X Premium+ OAuth):
 2. Click **Apply** / **Re-apply** under Factory models (registers `custom:droidproxy:grok-4.7` and `custom:droidproxy:grok-4.7-build-fast`)
 3. In Droid, `/model` → **DroidProxy: Grok 4.7** or **DroidProxy: Grok 4.7 Fast**
 
-Grok 4.7 is forwarded to `api.x.ai`. Grok 4.7 Fast (`grok-4.7-build-fast`) is the same model on faster infrastructure and is forwarded to `cli-chat-proxy.grok.com` with `x-grok-model-override`. The public xAI API does not serve that id.
+Grok 4.7 and Grok 4.7 Fast (`grok-4.7-build-fast`, the same model on faster infrastructure) are both forwarded to `cli-chat-proxy.grok.com` with `x-grok-model-override`, so usage counts as Grok Build rather than X API. The public xAI API does not serve the fast id.
 
 Apply also removes retired ids, including the old Cursor models (`cursor-composer-2.5`, `cursor-grok-4.6`, `cursor-grok-4.5`, `cursor-small`, `cursor-grok-4.6-fast`) and `grok-4.5` / `grok-4.6`, from `~/.factory/settings.json`.
 
@@ -40,7 +40,7 @@ mkdir -p ~/.factory/skills
 cp -R skills/gpt-image ~/.factory/skills/
 ```
 
-See [`skills/gpt-image/SKILL.md`](skills/gpt-image/SKILL.md). With DroidProxy running and Codex connected, the skill posts to `http://localhost:8317/v1/images/generations` (`gpt-image-2.5-flare` or `gpt-image-2.5-sunburst`); CLIProxyAPI injects your Codex bearer. Selecting a DroidProxy GPT chat model does not generate images.
+See [`skills/gpt-image/SKILL.md`](skills/gpt-image/SKILL.md). With DroidProxy running and Codex connected, the skill posts to `http://localhost:8317/v1/images/generations` (`gpt-image-2.6-flare` or `gpt-image-2.6-sunburst`; an older id such as 2.5 when the backend rejects 2.6). CLIProxyAPI injects your Codex bearer. Selecting a DroidProxy GPT chat model does not generate images.
 
 ## 2. Configure Factory
 
@@ -71,23 +71,34 @@ Open `~/.factory/settings.json` and add the following to the `customModels` arra
       "provider": "anthropic"
     },
     {
-      "model": "claude-sonnet-4-6",
-      "id": "custom:droidproxy:sonnet-4-6",
+      "model": "claude-sonnet-5-5",
+      "id": "custom:droidproxy:sonnet-5-5",
       "index": 2,
       "baseUrl": "http://localhost:8317",
       "apiKey": "dummy-not-used",
-      "displayName": "DroidProxy: Sonnet 4.6",
-      "maxOutputTokens": 64000,
+      "displayName": "DroidProxy: Sonnet 5.5",
+      "maxOutputTokens": 128000,
       "noImageSupport": false,
       "provider": "anthropic"
     },
     {
-      "model": "gpt-6-sol",
-      "id": "custom:droidproxy:gpt-6-sol",
+      "model": "gpt-6.1-sol",
+      "id": "custom:droidproxy:gpt-6.1-sol",
       "index": 3,
       "baseUrl": "http://localhost:8317/v1",
       "apiKey": "dummy-not-used",
-      "displayName": "DroidProxy: GPT 6 Sol",
+      "displayName": "DroidProxy: GPT 6.1 Sol",
+      "maxOutputTokens": 128000,
+      "noImageSupport": false,
+      "provider": "openai"
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "id": "custom:droidproxy:gpt-6.1-terra",
+      "index": 4,
+      "baseUrl": "http://localhost:8317/v1",
+      "apiKey": "dummy-not-used",
+      "displayName": "DroidProxy: GPT 6.1 Terra",
       "maxOutputTokens": 128000,
       "noImageSupport": false,
       "provider": "openai"
@@ -95,7 +106,7 @@ Open `~/.factory/settings.json` and add the following to the `customModels` arra
     {
       "model": "gpt-6-luna",
       "id": "custom:droidproxy:gpt-6-luna",
-      "index": 4,
+      "index": 5,
       "baseUrl": "http://localhost:8317/v1",
       "apiKey": "dummy-not-used",
       "displayName": "DroidProxy: GPT 6 Luna",
@@ -104,31 +115,31 @@ Open `~/.factory/settings.json` and add the following to the `customModels` arra
       "provider": "openai"
     },
     {
-      "model": "gemini-3.1-pro-preview",
-      "id": "custom:droidproxy:gemini-3.1-pro",
-      "index": 5,
-      "baseUrl": "http://localhost:8317",
+      "model": "gemini-4-argon-high",
+      "id": "custom:droidproxy:gemini-4-argon-high",
+      "index": 6,
+      "baseUrl": "http://localhost:8317/v1",
       "apiKey": "dummy-not-used",
-      "displayName": "DroidProxy: Gemini 3.1 Pro",
+      "displayName": "DroidProxy: Antigravity: Gemini 4 Argon",
       "maxOutputTokens": 65536,
       "noImageSupport": false,
-      "provider": "google"
+      "provider": "openai"
     },
     {
-      "model": "gemini-3-flash-preview",
-      "id": "custom:droidproxy:gemini-3-flash",
-      "index": 6,
-      "baseUrl": "http://localhost:8317",
+      "model": "gemini-3.8-flash-high",
+      "id": "custom:droidproxy:gemini-3.8-flash-high",
+      "index": 7,
+      "baseUrl": "http://localhost:8317/v1",
       "apiKey": "dummy-not-used",
-      "displayName": "DroidProxy: Gemini 3 Flash",
+      "displayName": "DroidProxy: Antigravity: Gemini 3.8 Flash (High)",
       "maxOutputTokens": 65536,
       "noImageSupport": false,
-      "provider": "google"
+      "provider": "openai"
     },
     {
       "model": "kimi-k3",
       "id": "custom:droidproxy:kimi-k3",
-      "index": 7,
+      "index": 8,
       "baseUrl": "http://localhost:8317/v1",
       "apiKey": "dummy-not-used",
       "displayName": "DroidProxy: Kimi K3",
@@ -143,7 +154,7 @@ Open `~/.factory/settings.json` and add the following to the `customModels` arra
 ]
 ```
 
-Use the standard Claude, Codex, Gemini, and Kimi model aliases in the `model` field. Claude and Gemini entries use `http://localhost:8317` (with `provider: "anthropic"` and `provider: "google"` respectively); GPT/Codex and Kimi entries use `provider: "openai"` with `http://localhost:8317/v1`. Reasoning effort is chosen per session from Droid CLI's model selector. DroidProxy preserves that selection, and CLIProxyAPI translates it to the provider-native request format.
+Use the standard Claude, Codex, Antigravity, and Kimi model aliases in the `model` field. Claude entries use `http://localhost:8317` with `provider: "anthropic"`; GPT/Codex, Antigravity, and Kimi entries use `provider: "openai"` with `http://localhost:8317/v1`. Reasoning effort is chosen per session from Droid CLI's model selector. DroidProxy preserves that selection, and CLIProxyAPI translates it to the provider-native request format.
 
 ## 3. Choose Reasoning Effort
 
@@ -151,10 +162,10 @@ Reasoning effort is selected per session in Droid CLI's model picker. DroidProxy
 
 - Fable 5.1: `low`, `medium`, `high`, `xhigh`, or `max`
 - Opus 5.5: `low`, `medium`, `high`, `xhigh`, or `max`
-- Sonnet 4.6: `low`, `medium`, `high`, or `max`
-- GPT 6 Astra, GPT 6 Sol, GPT 6 Luna: `low`, `medium`, `high`, `xhigh`, or `max`
-- Gemini 3.1 Pro: `low`, `medium`, or `high`
-- Gemini 3 Flash: `minimal`, `low`, `medium`, or `high`
+- Sonnet 5.5, Haiku 5.5: `low`, `medium`, `high`, `xhigh`, or `max`
+- GPT 6 Astra, GPT 6.1 Sol, GPT 6.1 Terra, GPT 6 Luna: `low`, `medium`, `high`, `xhigh`, or `max`
+- Gemini 4 Argon (Antigravity): `low`, `medium`, or `high`
+- Gemini 3.8 Flash (Antigravity): `high`
 - Kimi K3: `max` (the only currently supported effort)
 - Kimi K2.6: `high`
 

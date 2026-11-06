@@ -82,7 +82,7 @@ usage: droidproxy <command> [args]
   ctl call <method> [json]  run one action, e.g. droidproxy ctl call server.toggle
   status                    human-readable summary of the daemon state
   start | stop | restart    control the droidproxy systemd user service
-  open                      open the DroidProxy settings page in the browser
+  open [--web]              open the bar panel (--web opens the settings page)
   login <provider>          start a provider sign-in flow
   update [check|install]    check for updates, or install the available one
   rollback                  switch back to the previous version
@@ -264,6 +264,7 @@ func cmdService(action string, args []string) error {
 
 func cmdOpen(args []string) error {
 	fs := newFlagSet("open")
+	web := fs.Bool("web", false, "open the settings web app instead of the bar panel")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -272,8 +273,13 @@ func cmdOpen(args []string) error {
 			return fmt.Errorf("could not start the service: %w", err)
 		}
 	}
-	// The settings live in the browser now: the bar icon and the launcher
-	// entry both land here.
+	if !*web {
+		if _, err := desktop.Default.LookPath("omarchy-shell"); err == nil {
+			if err := desktop.ShellIPC(buildinfo.PluginID, "open"); err == nil {
+				return nil
+			}
+		}
+	}
 	return desktop.OpenURL(webui.URL())
 }
 

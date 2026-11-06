@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -218,6 +219,7 @@ func newTestEnv(t *testing.T, codexHandler, claudeHandler, tokenHandler http.Han
 	}
 
 	env.tracker = NewTracker()
+	env.tracker.SetMetaProbe(func(string) {})
 	env.tracker.SetBaseURLs(
 		serverURL(env.codex),
 		serverURL(env.claude),
@@ -312,6 +314,30 @@ func TestRefreshClearsSnapshotWhenNoEligibleAccounts(t *testing.T) {
 	}
 	if accounts := env.tracker.Accounts(); len(accounts) != 0 {
 		t.Fatalf("accounts = %v", accounts)
+	}
+}
+
+func TestRefreshSkipsCodexRequestWhileAccessTokenIsExpired(t *testing.T) {
+	var calls atomic.Int32
+	env := newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}, nil, nil)
+	path := writeAccountFile(t, env.home, "codex-a@b.com.json", map[string]any{
+		"type": "codex", "email": "a@b.com", "access_token": "stale", "refresh_token": "rt",
+	})
+	expiredAt := time.Now().Add(-time.Hour)
+	account := auth.Account{ID: filepath.Base(path), Email: "a@b.com", Type: auth.Codex, FilePath: path, Expired: &expiredAt, CanRefresh: true}
+
+	env.tracker.Refresh([]auth.Account{account}, nil, nil, nil)
+	waitFor(t, func() bool { return !env.tracker.IsRefreshing() })
+
+	accounts := env.tracker.Accounts()
+	if len(accounts) != 1 || accounts[0].Error != "Access token expired; it renews on this account's next request" {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("codex endpoint called %d times", calls.Load())
 	}
 }
 
@@ -505,11 +531,18 @@ func TestRefreshMetaReadsLocalStore(t *testing.T) {
 			WeeklyUsedPercent: 12, WeeklyResetsAt: weekly, ObservedAt: observed,
 		}
 	})
+	var probed sync.Map
+	env.tracker.SetMetaProbe(func(accountID string) { probed.Store(accountID, true) })
 	env.tracker.Refresh(nil, nil, nil, []auth.Account{
 		{ID: "meta-1", Email: "m@x.com", Type: auth.Meta},
 		{ID: "meta-2", Email: "n@x.com", Type: auth.Meta},
 	})
 	waitFor(t, func() bool { return !env.tracker.IsRefreshing() })
+	for _, id := range []string{"meta-1", "meta-2"} {
+		if _, ok := probed.Load(id); !ok {
+			t.Errorf("%s was read without a stale-snapshot probe", id)
+		}
+	}
 
 	accounts := env.tracker.Accounts()
 	if len(accounts) != 2 {
@@ -582,6 +615,7 @@ func TestUpdateMetaAccountsOnlyTouchesMeta(t *testing.T) {
 			WeeklyUsedPercent: 2, WeeklyResetsAt: time.Now().Add(24 * time.Hour), ObservedAt: observed,
 		}
 	})
+	env.tracker.SetMetaProbe(func(string) { t.Error("a live Meta update must read the store without probing") })
 	env.tracker.UpdateMetaAccounts([]auth.Account{{ID: "m1", Email: "m@x.com", Type: auth.Meta}})
 	accounts := env.tracker.Accounts()
 	if len(accounts) != 1 || accounts[0].Error != "" || len(accounts[0].Windows) != 2 {

@@ -10,6 +10,8 @@ const ui = {
   fastModeOpen: true,
   expandedProviders: {},
   sseOk: false,
+  // Usage gauge showing the copy checkmark: { key, until }.
+  copiedGauge: null,
 };
 
 function el(tag, attrs, ...children) {
@@ -235,6 +237,8 @@ function ringSVG(size, stroke, tracks) {
   return svg;
 }
 
+const COPY_HINT = "Click to copy a curl for this usage";
+
 function usageHelpText(w) {
   const usage =
     w.hasRemaining && w.remainingPercent !== undefined
@@ -275,7 +279,10 @@ function gauge(windows, providerId, iconFile) {
   const logo = el("div", { class: "gauge-logo" });
   logo.append(iconEl(iconFile, color, 22));
   g.append(logo);
-  const help = [usageHelpText(inner)].concat(outer ? [usageHelpText(outer)] : []).join("\n");
+  const help = [usageHelpText(inner)]
+    .concat(outer ? [usageHelpText(outer)] : [])
+    .concat([COPY_HINT])
+    .join("\n");
   g.addEventListener("mousemove", (e) => showGaugeTip(help, e.clientX, e.clientY));
   g.addEventListener("mouseleave", hideGaugeTip);
   return g;
@@ -291,13 +298,59 @@ function compactGauge(window, providerId, iconFile) {
   const logo = el("div", { class: "gauge-logo" });
   logo.append(iconEl(iconFile, color, 12));
   g.append(logo);
-  const help = usageHelpText(window);
+  const help = usageHelpText(window) + "\n" + COPY_HINT;
   g.addEventListener("mousemove", (e) => showGaugeTip(help, e.clientX, e.clientY));
   g.addEventListener("mouseleave", hideGaugeTip);
   row.append(g);
   row.append(el("span", { class: "gauge-email", text: window.title, title: help }));
   return row;
 }
+
+const COPY_CHECKMARK_MS = 1000;
+const COPY_TOAST_MS = 1600;
+let toastTimer = null;
+
+function showToast(message) {
+  const toast = document.getElementById("toast");
+  toast.textContent = message;
+  toast.classList.add("visible");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove("visible"), COPY_TOAST_MS);
+}
+
+function usageKey(a) {
+  return a.provider + ":" + a.id;
+}
+
+// Clicking a gauge copies a curl for that account's live usage
+// (GET /droidproxy/usage on the proxy port). Only a copy that landed is
+// confirmed; a repeat click restarts both timers.
+async function copyUsageCurl(a) {
+  const result = await call("usage.copyCurl", { provider: a.provider, accountId: a.id });
+  if (!result.ok) {
+    ui.copiedGauge = null;
+    render();
+    return;
+  }
+  const until = Date.now() + COPY_CHECKMARK_MS;
+  ui.copiedGauge = { key: usageKey(a), until };
+  render();
+  showToast(`Copied ${a.providerName || a.provider} usage curl`);
+  setTimeout(() => {
+    if (ui.copiedGauge && ui.copiedGauge.until === until) {
+      ui.copiedGauge = null;
+      render();
+    }
+  }, COPY_CHECKMARK_MS);
+}
+
+function copyable(target, gaugeNode, a) {
+  gaugeNode.classList.add("copyable");
+  if (ui.copiedGauge && ui.copiedGauge.key === usageKey(a)) gaugeNode.classList.add("copied");
+  target.addEventListener("click", () => copyUsageCurl(a));
+  return target;
+}
+
 function usageCard() {
   const usage = ui.state.usage;
   if (!usage || !usage.visible) return null;
@@ -341,11 +394,16 @@ function usageCard() {
         el("div", { class: "gauge-error", title: a.error }, el("span", { text: "⚠" }), el("span", { text: a.error }))
       );
     } else if ((a.windows || []).length > 2) {
+      // The whole stack copies one account's curl, so every ring confirms it.
       const stack = el("div", { class: "gauge-group" });
-      for (const w of a.windows) stack.append(compactGauge(w, a.provider, providerIcon(a.provider)));
+      for (const w of a.windows) {
+        const row = compactGauge(w, a.provider, providerIcon(a.provider));
+        stack.append(copyable(row, row.querySelector(".gauge"), a));
+      }
       group.append(stack);
     } else if ((a.windows || []).length > 0) {
-      group.append(gauge(a.windows, a.provider, providerIcon(a.provider)));
+      const g = gauge(a.windows, a.provider, providerIcon(a.provider));
+      group.append(copyable(g, g, a));
     }
     if (!a.loading && !a.error && a.updatedAt && a.provider === "meta") {
       group.append(el("div", { class: "gauge-email", text: "as of " + relTime(a.updatedAt) }));
@@ -624,9 +682,48 @@ function deviceBox(kind) {
 
 const FAST_MODES = [
   { key: "gpt6AstraFastMode", title: "GPT 6 Astra" },
-  { key: "gpt6SolFastMode", title: "GPT 6 Sol" },
+  { key: "gpt61SolFastMode", title: "GPT 6.1 Sol" },
+  { key: "gpt61TerraFastMode", title: "GPT 6.1 Terra" },
   { key: "gpt6LunaFastMode", title: "GPT 6 Luna" },
 ];
+
+const WINDOW_PRIMER_PROVIDERS = ["claude", "codex", "meta"];
+
+function primerRow(p) {
+  const enabledKey = "windowPrimerEnabled." + p.id;
+  const minutesKey = "windowPrimerMinutes." + p.id;
+  const enabled = setting(enabledKey, false);
+  const row = el(
+    "div",
+    { class: "fast-row" },
+    el("span", { text: "5-hour window" })
+  );
+  const controls = el("div", { class: "primer-controls" });
+  if (enabled) {
+    const minutes = setting(minutesKey, 7 * 60);
+    const pad = (n) => String(n).padStart(2, "0");
+    const time = el("input", {
+      class: "field primer-time",
+      type: "time",
+      value: pad(Math.floor(minutes / 60)) + ":" + pad(minutes % 60),
+      "aria-label": p.name + " auto-start time",
+    });
+    time.addEventListener("change", () => {
+      const [h, m] = time.value.split(":").map(Number);
+      if (Number.isInteger(h) && Number.isInteger(m)) setSetting(minutesKey, h * 60 + m);
+    });
+    controls.append(time);
+  }
+  controls.append(
+    el("span", {
+      text: "Auto-start daily",
+      title: `Sends one tiny request (a few tokens) per account at this time every day while DroidProxy is running, so your 5-hour ${p.name} window is already underway when you start work and resets sooner during your day.`,
+    }),
+    toggle(enabled, null, (v) => setSetting(enabledKey, v), "Auto-start daily")
+  );
+  row.append(controls);
+  return row;
+}
 
 function accountRow(p, a) {
   const showToggle = (p.accounts || []).length > 1;
@@ -703,13 +800,14 @@ function providerSection(p) {
         "div",
         { class: "fast-row" },
         el("span", {
-          text: "Muse Spark · Contributor mode",
-          title: "Applies Muse Spark 1.3 Contributor instead of Muse Spark 1.3 when Factory custom models are applied. Only one is ever active.",
+          text: "Muse Wonder · Contributor mode",
+          title: "Applies the contributor variant of each Muse Wonder model instead of the base model when you apply Factory custom models. Only one variant per model is active at a time.",
         }),
         toggle(setting("metaContributorMode", false), null, (v) => setSetting("metaContributorMode", v))
       )
     );
   }
+  if (WINDOW_PRIMER_PROVIDERS.includes(p.id)) detail.append(primerRow(p));
   if (p.id === "codex") {
     const fm = el("div", { class: "fast-mode" });
     fm.append(

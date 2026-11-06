@@ -4,8 +4,10 @@ The `droidproxy serve` daemon exposes a local control API. The Omarchy shell
 plugin, the `droidproxy` CLI, and scripts all use it. It replaces the macOS
 app's in-process calls between `AppDelegate`, `SettingsView`, and the managers.
 
-The settings web app (what the bar icon opens) talks to the same daemon over
-plain localhost HTTP instead — see [Settings web UI](#settings-web-ui).
+The bar panel talks to this API through `droidproxy ctl`. The settings web app
+talks to the same daemon over plain localhost HTTP instead — see
+[Settings web UI](#settings-web-ui). `droidproxy open` opens the panel;
+`droidproxy open --web` opens the web app.
 
 ## Transport
 
@@ -73,7 +75,7 @@ All keys are always present. Strings are never `null`; use `""`.
     "repoUrl": "https://github.com/nikships/droidproxy-omarchy",
     "issuesUrl": "https://github.com/nikships/droidproxy-omarchy/issues",
     "cliProxyApiUrl": "https://github.com/router-for-me/CLIProxyAPI",
-    "cliProxyApiVersion": "7.3.13"
+    "cliProxyApiVersion": "8.0.58"
   },
   "server": {
     "running": true,               // ThinkingProxy (:8317) and CLIProxyAPI (:8318) both up
@@ -95,9 +97,16 @@ All keys are always present. Strings are never `null`; use `""`.
     "oledTheme": false,
     "backgroundOpacity": 0.55,
     "gpt6AstraFastMode": false,
-    "gpt6SolFastMode": false,
+    "gpt61SolFastMode": false,
+    "gpt61TerraFastMode": false,
     "gpt6LunaFastMode": false,
     "metaContributorMode": false,
+    "windowPrimerEnabled.claude": false, // "Auto-start daily" 5-hour window
+    "windowPrimerMinutes.claude": 420,   // minutes after local midnight (07:00)
+    "windowPrimerEnabled.codex": false,
+    "windowPrimerMinutes.codex": 420,
+    "windowPrimerEnabled.meta": false,
+    "windowPrimerMinutes.meta": 420,
     "autoCheckUpdates": true,
     "autoInstallUpdates": false
   },
@@ -149,6 +158,7 @@ All keys are always present. Strings are never `null`; use `""`.
     "refreshing": false,
     "accounts": [
       {
+        "id": "codex-a@b.com.json",      // account id (auth file name, or Meta account id)
         "provider": "codex",
         "providerName": "Codex",
         "email": "a@b.com",
@@ -200,6 +210,7 @@ All keys are always present. Strings are never `null`; use `""`.
 | `settings.set` | `{"key","value"}` | Set one key from `state.settings` (see below). |
 | `factory.apply` | – | Apply/Re-apply Factory custom models (backup first). |
 | `usage.refresh` | – | Refresh OAuth quota windows. |
+| `usage.copyCurl` | `{"provider","accountId"}` | Copy a `curl` for that account's [usage endpoint](#usage-endpoint) (what clicking a quota gauge does). |
 | `update.check` | – | Check for updates now. |
 | `update.install` | – | Download, verify, install the available update, then restart. |
 | `app.quit` | – | Stop servers and exit the daemon (`systemctl --user stop`). |
@@ -213,8 +224,9 @@ All keys are always present. Strings are never `null`; use `""`.
 | `sequentialAccountFailover` | bool | `setSequentialAccountFailover` (regenerate config). |
 | `beta` | bool | Stored; beta-gated rows (bind address). |
 | `oledTheme`, `backgroundOpacity` | bool/number | Stored; legacy QML panel appearance (the web UI is always OLED black). |
-| `gpt6AstraFastMode`, `gpt6SolFastMode`, `gpt6LunaFastMode` | bool | ThinkingProxy fast mode. |
+| `gpt6AstraFastMode`, `gpt61SolFastMode`, `gpt61TerraFastMode`, `gpt6LunaFastMode` | bool | ThinkingProxy fast mode. |
 | `metaContributorMode` | bool | Stored; affects Factory model apply. |
+| `windowPrimerEnabled.<p>`, `windowPrimerMinutes.<p>` (`<p>` is `claude`, `codex` or `meta`) | bool / int 0–1439 | "Auto-start daily": once a day at that local time (up to 2 hours late, retried every 5 minutes on failure) the daemon sends one tiny request per enabled account, so the 5-hour window is already running when work starts. Claude and Codex go through ThinkingProxy; Meta goes straight to `api.meta.ai` with each account's key. |
 | `autoCheckUpdates`, `autoInstallUpdates` | bool | Updater behavior. |
 
 ### Action result
@@ -228,6 +240,46 @@ All keys are always present. Strings are never `null`; use `""`.
 alert. `title` is optional (defaults to "DroidProxy"). A result with an empty
 `message` needs no dialog.
 
+
+## Usage endpoint
+
+ThinkingProxy answers `GET /droidproxy/usage` on `:8317` itself (never
+forwarded upstream) with live quota windows as JSON, so an agent can poll its
+own quota and stop before it runs out. Both query parameters are optional:
+`provider` (`codex`, `claude`, `grok`, `meta`) and `account` (auth file
+name, email, or display name). There is no auth or loopback restriction; it
+binds wherever the proxy binds.
+
+```json
+{
+  "generated_at": "2026-11-04T12:00:00Z",
+  "accounts": [
+    {
+      "provider": "codex",
+      "account": "a@b.com",
+      "id": "codex-a@b.com.json",
+      "windows": [
+        { "name": "5-hour", "used_percent": 27.5, "remaining_percent": 72.5,
+          "resets_at": "2026-11-04T14:10:00Z", "resets_in_seconds": 7800 }
+      ],
+      "error": null,
+      "as_of": "2026-11-04T11:59:58Z"
+    }
+  ]
+}
+```
+
+Only accounts of switched-on providers are read, skipping disabled and
+expired ones (a Meta account with an expired key still answers from its
+stored snapshot). No matching enabled account answers 404 with `error` and
+the `available` accounts. Reads share the per-account polling budget with
+the settings gauges (Claude at most every 5 minutes, others every 15 seconds,
+longer after a 429),
+so polling in a loop never hits the upstream usage APIs harder than that.
+Meta has no usage endpoint: when an account's stored snapshot is over 60
+seconds old, the read sends a 16-token streamed `/v1/responses` request with
+that account's key and records the quota event it carries. This spends a few
+tokens of Meta quota; a failed probe answers with the stored "as of" values.
 
 ## Not ported
 

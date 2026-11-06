@@ -379,8 +379,10 @@ func CompatibilityConfig(accounts []Account, enabled bool, now time.Time) string
 	b.WriteString(strings.Join(entries, "\n"))
 	b.WriteString("\n")
 	b.WriteString("    models:\n")
-	b.WriteString("      - name: \"muse-spark-1.3\"\n")
-	b.WriteString("      - name: \"muse-spark-1.3-contributor\"\n")
+	b.WriteString("      - name: \"muse-wonder-1.0\"\n")
+	b.WriteString("      - name: \"muse-wonder-1.0-contributor\"\n")
+	b.WriteString("      - name: \"muse-wonder-full-1.0\"\n")
+	b.WriteString("      - name: \"muse-wonder-full-1.0-contributor\"\n")
 	return b.String()
 }
 

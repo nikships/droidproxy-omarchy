@@ -8,7 +8,7 @@
   <strong>Your Claude, Codex, Gemini, Grok, and Meta Muse subscriptions — on Omarchy, for <a href="https://app.factory.ai"><img src="factory-logo.svg" alt="Factory.ai" height="16"></a> Droids.</strong>
 </p>
 
-A native Linux port of [DroidProxy](https://github.com/anand-92/droidproxy) for [Omarchy](https://omarchy.org). Background service, Omarchy bar icon, settings web app. Built on [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
+A native Linux port of [DroidProxy](https://github.com/anand-92/droidproxy) for [Omarchy](https://omarchy.org). Background service and an Omarchy bar panel. Built on [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
 <p align="center">
   <img src="droidproxy-simplifier.gif" alt="DroidProxy" width="720">
@@ -44,11 +44,12 @@ droidproxy uninstall --purge  # also removes DroidProxy's settings
 ## Features
 
 - **One-click OAuth auth** -- Claude Code, Codex, and Antigravity login from Settings, with credential monitoring and automatic OAuth token refresh. Multiple accounts per provider, with per-account enable/disable.
-- **Grok and Meta Muse** -- Device-code sign-in for SuperGrok / X Premium+ (Grok 4.7 and Grok 4.7 Fast) and Meta Muse (Muse Spark 1.3, with Contributor mode).
-- **Every model, every reasoning level** -- Fable 5.1, Opus 5.5, Sonnet 4.6, GPT 6 Astra, GPT 6 Sol, GPT 6 Luna, Gemini 3.1 Pro, Gemini 3 Flash, and more — registered as Factory custom models with their full set of native reasoning levels. Pick the effort per session in Droid's model selector.
-- **Fast Mode** -- Optional `service_tier=priority` for GPT 6 Astra, GPT 6 Sol, and GPT 6 Luna. Grok 4.7 Fast is a separate SuperGrok model (`grok-4.7-build-fast`).
+- **Grok and Meta Muse** -- Device-code sign-in for SuperGrok / X Premium+ (Grok 4.7 and Grok 4.7 Fast) and Meta Muse (Muse Wonder 1.0 and Muse Wonder Full 1.0, with Contributor mode).
+- **Every model, every reasoning level** -- Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5, GPT 6 Astra, GPT 6.1 Sol, GPT 6.1 Terra, GPT 6 Luna, Gemini 4 Argon, Gemini 3.8 Flash, and more — registered as Factory custom models with their full set of native reasoning levels. Pick the effort per session in Droid's model selector.
+- **Fast Mode** -- Optional `service_tier=priority` for GPT 6 Astra, GPT 6.1 Sol, GPT 6.1 Terra, and GPT 6 Luna. Grok 4.7 Fast is a separate SuperGrok model (`grok-4.7-build-fast`).
 - **Account failover** -- Round-robin by default, or sequential failover that rides one account until its quota runs out.
-- **Usage tracking** -- Claude, Codex, Grok, and Meta Muse OAuth quota windows (5-hour + weekly) as ring gauges in the Settings web app, just like the Mac app.
+- **Usage tracking** -- Claude, Codex, Grok, and Meta Muse OAuth quota windows (5-hour + weekly) as ring gauges in the bar panel, just like the Mac app. Click a gauge to copy a `curl` for that account's live quota (`GET /droidproxy/usage` on the proxy port), so an agent can check its own quota before it runs out.
+- **Auto-start daily** -- Optional per-provider time for Claude, Codex, and Meta Muse: DroidProxy sends one tiny request per account then, so the 5-hour window is already underway when you start work and resets sooner in your day.
 - **Grok Imagine and GPT Image** -- OpenAI-compatible image generation through your Grok or Codex subscription. See [Image generation skills](#image-generation-skills).
 - **Remote access** -- Optional remote management with a secret key, and a configurable bind address (beta).
 
@@ -58,8 +59,8 @@ droidproxy uninstall --purge  # also removes DroidProxy's settings
 
 ## Using it
 
-- **Bar icon** -- click to open the Settings web app (`http://127.0.0.1:8320`). The icon tint shows the server state.
-- **Settings** -- the bar icon, the launcher entry, or `droidproxy open`. Server control, provider accounts, OAuth quota gauges, Factory models, remote access, and updates.
+- **Bar panel** -- click the bar icon to open the panel: server, quota rings, accounts, Factory models, and the provider switches. The icon tint shows the server state. `droidproxy open --web` still opens the settings page at `http://127.0.0.1:8320`.
+- **Settings** -- the bar panel, the launcher entry, or `droidproxy open`. Server control, provider accounts, OAuth quota gauges, Factory models, remote access, and updates.
 - **Factory models** -- Settings → **Factory custom models → Apply** writes DroidProxy's models into `~/.factory/settings.json` (timestamped backup first). In Droid, use `/model` and search for "DroidProxy:".
 
 See [SETUP.md](SETUP.md) for provider details and manual Factory configuration. **(OR use the 1-click options in the UI!)**
@@ -69,7 +70,7 @@ See [SETUP.md](SETUP.md) for provider details and manual Factory configuration. 
 ```
 droidproxy status              show server and provider status
 droidproxy start|stop|restart  control the proxy servers
-droidproxy open                open the Settings web app
+droidproxy open [--web]       open the bar panel, or the settings page with --web
 droidproxy login <provider>    add an account (claude, codex, antigravity, grok, meta)
 droidproxy update [check|install]
 droidproxy rollback            go back to the previously installed version
@@ -101,7 +102,7 @@ cp -R skills/gpt-image ~/.factory/skills/
 Both skills post to `http://localhost:8317/v1/images/generations` with `Authorization: Bearer dummy-not-used`:
 
 - **Grok** -- model `grok-imagine-image-2.0`. ThinkingProxy injects your Grok OAuth token and forwards to xAI.
-- **GPT** -- model `gpt-image-2.5-flare` (fast default) or `gpt-image-2.5-sunburst` (maximum quality). CLIProxyAPI injects your Codex OAuth token. Requires ChatGPT Plus/Pro.
+- **GPT** -- model `gpt-image-2.6-flare` (fast default) or `gpt-image-2.6-sunburst` (maximum quality). The skill can target an older id, including 2.5, when this backend rejects 2.6. CLIProxyAPI injects your Codex OAuth token. Requires ChatGPT Plus/Pro.
 
 ## Requirements
 

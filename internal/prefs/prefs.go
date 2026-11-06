@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nikships/droidproxy-omarchy/internal/events"
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
@@ -18,7 +19,8 @@ import (
 // Keys match the macOS UserDefaults keys so settings read the same everywhere.
 const (
 	KeyGPT6AstraFastMode         = "gpt6AstraFastMode"
-	KeyGPT6SolFastMode           = "gpt6SolFastMode"
+	KeyGPT61SolFastMode          = "gpt61SolFastMode"
+	KeyGPT61TerraFastMode        = "gpt61TerraFastMode"
 	KeyGPT6LunaFastMode          = "gpt6LunaFastMode"
 	KeyMetaContributorMode       = "metaContributorMode"
 	KeyAllowRemote               = "allowRemote"
@@ -192,7 +194,8 @@ func (s *Store) StringSlice(key string) []string {
 // ---- AppPreferences equivalents -------------------------------------------
 
 func GPT6AstraFastMode() bool   { return Shared().Bool(KeyGPT6AstraFastMode, false) }
-func GPT6SolFastMode() bool     { return Shared().Bool(KeyGPT6SolFastMode, false) }
+func GPT61SolFastMode() bool    { return Shared().Bool(KeyGPT61SolFastMode, false) }
+func GPT61TerraFastMode() bool  { return Shared().Bool(KeyGPT61TerraFastMode, false) }
 func GPT6LunaFastMode() bool    { return Shared().Bool(KeyGPT6LunaFastMode, false) }
 func MetaContributorMode() bool { return Shared().Bool(KeyMetaContributorMode, false) }
 func AllowRemote() bool         { return Shared().Bool(KeyAllowRemote, false) }
@@ -247,4 +250,42 @@ func SetProviderEnabled(provider string, enabled bool) error {
 	m := EnabledProviders()
 	m[provider] = enabled
 	return Shared().Set(KeyEnabledProviders, m)
+}
+
+// DefaultWindowPrimerMinutes is 07:00, in minutes after local midnight.
+const DefaultWindowPrimerMinutes = 7 * 60
+
+// Window primer keys are per provider ("claude", "codex", "meta").
+func WindowPrimerEnabledKey(provider string) string   { return "windowPrimerEnabled." + provider }
+func WindowPrimerMinutesKey(provider string) string   { return "windowPrimerMinutes." + provider }
+func windowPrimerLastFiredKey(provider string) string { return "windowPrimerLastFired." + provider }
+
+// WindowPrimerEnabled reports whether "Auto-start daily" is on for provider.
+func WindowPrimerEnabled(provider string) bool {
+	return Shared().Bool(WindowPrimerEnabledKey(provider), false)
+}
+
+// WindowPrimerMinutes is the chosen time in minutes after local midnight.
+func WindowPrimerMinutes(provider string) int {
+	var v int
+	if Shared().Get(WindowPrimerMinutesKey(provider), &v) {
+		return v
+	}
+	return DefaultWindowPrimerMinutes
+}
+
+// WindowPrimerLastFired is when provider's window was last started, or nil.
+// Stored as unix seconds, like lastUpdateCheck.
+func WindowPrimerLastFired(provider string) *time.Time {
+	var seconds int64
+	if !Shared().Get(windowPrimerLastFiredKey(provider), &seconds) {
+		return nil
+	}
+	t := time.Unix(seconds, 0)
+	return &t
+}
+
+// SetWindowPrimerLastFired records when provider's window was started.
+func SetWindowPrimerLastFired(provider string, t time.Time) error {
+	return Shared().Set(windowPrimerLastFiredKey(provider), t.Unix())
 }
