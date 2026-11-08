@@ -9,6 +9,7 @@ const (
 	ServerStatusChanged  = "ServerStatusChanged"
 	AuthDirectoryChanged = "AuthDirectoryChanged"
 	MetaAccountsChanged  = "MetaAccountsChanged"
+	MetaUsageChanged     = "MetaUsageChanged"
 	PrefsChanged         = "PrefsChanged"
 	CopilotChanged       = "CopilotChanged"
 	UsageChanged         = "UsageChanged"

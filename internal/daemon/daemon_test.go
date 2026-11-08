@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nikships/droidproxy-omarchy/internal/auth"
 	"github.com/nikships/droidproxy-omarchy/internal/backend"
 	"github.com/nikships/droidproxy-omarchy/internal/control"
 	"github.com/nikships/droidproxy-omarchy/internal/desktop"
@@ -39,6 +40,9 @@ type fakeDesktop struct {
 	runs      []string
 	detached  []string
 	clipboard []string
+	// clipboardFails makes every wl-copy run fail, like a session without
+	// a reachable clipboard.
+	clipboardFails bool
 }
 
 func (f *fakeDesktop) Run(_ context.Context, name string, args ...string) (string, error) {
@@ -68,6 +72,9 @@ func (f *fakeDesktop) Run(_ context.Context, name string, args ...string) (strin
 		return "", nil
 	}
 	if name == "wl-copy" && len(args) >= 1 {
+		if f.clipboardFails {
+			return "", errors.New("wl-copy: no display")
+		}
 		f.clipboard = append(f.clipboard, args[0])
 	}
 	return "", nil
@@ -173,7 +180,7 @@ func startTestDaemon(t *testing.T) (*control.Client, *fakeDesktop) {
 	backend.PgrepPath, backend.PkillPath = "/bin/true", "/bin/true"
 	t.Cleanup(func() { backend.PgrepPath, backend.PkillPath = oldPgrep, oldPkill })
 	oldFactory := proxyFactory
-	proxyFactory = func() proxyServer { return &fakeProxy{} }
+	proxyFactory = func(*Daemon) proxyServer { return &fakeProxy{} }
 	t.Cleanup(func() { proxyFactory = oldFactory })
 	events.Reset()
 	t.Cleanup(events.Reset)
@@ -260,9 +267,6 @@ func TestDaemonStateBasics(t *testing.T) {
 	if !st.Settings.LaunchAtLogin {
 		t.Error("launchAtLogin should reflect the enabled unit")
 	}
-	if st.Settings.BackgroundOpacity != 0.55 {
-		t.Errorf("backgroundOpacity = %v", st.Settings.BackgroundOpacity)
-	}
 	if !st.Settings.AutoCheckUpdates {
 		t.Error("autoCheckUpdates should default on")
 	}
@@ -307,11 +311,11 @@ func TestDaemonServerToggle(t *testing.T) {
 func TestDaemonSettingsAndDesktopActions(t *testing.T) {
 	client, desk := startTestDaemon(t)
 
-	if res := callOK(t, client, "settings.set", map[string]any{"key": "oledTheme", "value": true}); !res.OK {
-		t.Fatalf("settings.set oledTheme = %+v", res)
+	if res := callOK(t, client, "settings.set", map[string]any{"key": "verboseLogging", "value": true}); !res.OK {
+		t.Fatalf("settings.set verboseLogging = %+v", res)
 	}
-	if st, _ := client.State(); !st.Settings.OLEDTheme {
-		t.Error("oledTheme did not persist")
+	if st, _ := client.State(); !st.Settings.VerboseLogging {
+		t.Error("verboseLogging did not persist")
 	}
 
 	if res := callOK(t, client, "settings.set", map[string]any{"key": "launchAtLogin", "value": false}); !res.OK {
@@ -337,6 +341,24 @@ func TestDaemonSettingsAndDesktopActions(t *testing.T) {
 		t.Errorf("clipboard = %v", texts)
 	}
 
+	if res := callOK(t, client, "usage.copyCurl", map[string]any{"provider": "codex", "accountId": "codex-a@b.com.json"}); !res.OK {
+		t.Fatalf("usage.copyCurl = %+v", res)
+	}
+	wantCurl := "curl -s 'http://127.0.0.1:8317/droidproxy/usage?provider=codex&account=codex-a@b.com.json'"
+	if texts := desk.clipboardTexts(); len(texts) == 0 || texts[len(texts)-1] != wantCurl {
+		t.Errorf("clipboard = %v, want %s", texts, wantCurl)
+	}
+	// The panel shows its checkmark and toast only for an ok result.
+	desk.mu.Lock()
+	desk.clipboardFails = true
+	desk.mu.Unlock()
+	if res := callOK(t, client, "usage.copyCurl", map[string]any{"provider": "codex", "accountId": "codex-a@b.com.json"}); res.OK || res.Error == "" {
+		t.Errorf("usage.copyCurl with a failing clipboard = %+v", res)
+	}
+	desk.mu.Lock()
+	desk.clipboardFails = false
+	desk.mu.Unlock()
+
 	if res := callOK(t, client, "open.url", map[string]any{"url": "https://github.com/router-for-me/CLIProxyAPI"}); !res.OK {
 		t.Fatalf("open.url = %+v", res)
 	}
@@ -352,6 +374,19 @@ func TestDaemonSettingsAndDesktopActions(t *testing.T) {
 
 	if res := callOK(t, client, "open.url", map[string]any{"url": "file:///etc/passwd"}); res.OK {
 		t.Error("open.url must reject non-http(s) URLs")
+	}
+	if res := callOK(t, client, "settings.set", map[string]any{"key": "windowPrimerEnabled.codex", "value": true}); !res.OK {
+		t.Fatalf("settings.set windowPrimerEnabled.codex = %+v", res)
+	}
+	if res := callOK(t, client, "settings.set", map[string]any{"key": "windowPrimerMinutes.codex", "value": 450}); !res.OK {
+		t.Fatalf("settings.set windowPrimerMinutes.codex = %+v", res)
+	}
+	if st, _ := client.State(); !st.Settings.WindowPrimerEnabledCodex || st.Settings.WindowPrimerMinutesCodex != 450 ||
+		st.Settings.WindowPrimerEnabledClaude || st.Settings.WindowPrimerMinutesClaude != 7*60 {
+		t.Errorf("window primer settings = %+v", st.Settings)
+	}
+	if res := callOK(t, client, "settings.set", map[string]any{"key": "windowPrimerMinutes.codex", "value": 24 * 60}); res.OK {
+		t.Error("a time past midnight must fail")
 	}
 	if res := callOK(t, client, "settings.set", map[string]any{"key": "nonsense", "value": true}); res.OK {
 		t.Error("unknown setting must fail")
@@ -449,4 +484,27 @@ func TestDaemonUpdateCheck(t *testing.T) {
 	}
 	stateWhen(t, client, 15*time.Second, func(s control.State) bool { return s.Update.State == control.UpdateUpToDate },
 		"update check to finish")
+}
+
+// A refreshable account whose access token expires and is later renewed
+// in place must change the usage signature: IsExpired() is false on both
+// sides (the token can refresh), so IDs alone would skip the refresh and
+// leave the expiry error card up.
+func TestProviderUsageSignatureChangesOnTokenRenewal(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	future := time.Now().Add(time.Hour)
+	expired := []auth.Account{{ID: "codex-a.json", Type: auth.Codex, Expired: &past, CanRefresh: true}}
+	renewed := []auth.Account{{ID: "codex-a.json", Type: auth.Codex, Expired: &future, CanRefresh: true}}
+
+	if providerUsageSignature(auth.Codex, expired) == providerUsageSignature(auth.Codex, renewed) {
+		t.Fatal("signature must change when an expired access token is renewed")
+	}
+	if providerUsageSignature(auth.Codex, renewed) != providerUsageSignature(auth.Codex, renewed) {
+		t.Fatal("signature must be stable for unchanged accounts")
+	}
+	// Unrefreshable expiry still excludes the account entirely.
+	dead := []auth.Account{{ID: "codex-a.json", Type: auth.Codex, Expired: &past, CanRefresh: false}}
+	if got := providerUsageSignature(auth.Codex, dead); got != "" {
+		t.Fatalf("signature for unrefreshable expired account = %q, want empty", got)
+	}
 }

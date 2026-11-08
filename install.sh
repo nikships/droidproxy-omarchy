@@ -14,8 +14,6 @@ set -euo pipefail
 
 REPO="nikships/droidproxy-omarchy"
 FEED_URL="${DROIDPROXY_FEED_URL:-https://github.com/${REPO}/releases/latest/download/latest.json}"
-INSTALL_ROOT="${HOME}/.local/share/droidproxy"
-BIN_DIR="${HOME}/.local/bin"
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33mWARNING:\033[0m %s\n' "$*" >&2; }
@@ -31,6 +29,12 @@ for tool in curl tar; do
 done
 if ! command -v jq >/dev/null 2>&1; then
   warn "jq not found; SHA-256 comes from SHA256SUMS instead of latest.json."
+fi
+if ! command -v omarchy-shell >/dev/null 2>&1; then
+  warn "omarchy-shell not found; the proxy will install, but the bar panel needs the Omarchy shell."
+fi
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+  warn "No systemd user session; the service will be installed but cannot start until you log in."
 fi
 
 # --- architecture ------------------------------------------------------------
@@ -106,7 +110,7 @@ if curl -fsSL "$SIG_URL" -o "$SIG_FILE" 2>/dev/null; then
   if command -v openssl >/dev/null 2>&1; then
     # The public key is a raw 32-byte ed25519 key stored base64; openssl needs
     # DER (302a300506032b6570032100 + key) wrapped in PEM.
-    PUB_B64="6zisXnU+IrMiOPOAimuHxm0p9YN4VCcQfGhhUpymiCw="
+    PUB_B64="CZQkgDPfujZE1bt3q5HxTyWjvWwSWEQ7iRlbkJ4Ehpk="
     printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00' > "${WORK_DIR}/pubkey.der"
     printf '%s' "$PUB_B64" | base64 -d >> "${WORK_DIR}/pubkey.der"
     {
@@ -115,8 +119,9 @@ if curl -fsSL "$SIG_URL" -o "$SIG_FILE" 2>/dev/null; then
       echo
       echo "-----END PUBLIC KEY-----"
     } > "${WORK_DIR}/pubkey.pem"
+    openssl base64 -d -A -in "$SIG_FILE" -out "${SIG_FILE}.raw"
     if openssl pkeyutl -verify -pubin -inkey "${WORK_DIR}/pubkey.pem" -rawin \
-         -in "${WORK_DIR}/${TARBALL}" -sigfile "$SIG_FILE" >/dev/null 2>&1; then
+         -in "${WORK_DIR}/${TARBALL}" -sigfile "${SIG_FILE}.raw" >/dev/null 2>&1; then
       SIGNATURE_OK=1
       info "ed25519 signature verified."
     else

@@ -31,11 +31,12 @@ const (
 	Scope           = "openid profile email offline_access grok-cli:access api:access"
 	DeviceGrantType = "urn:ietf:params:oauth:grant-type:device_code"
 
-	// APIHost is the public xAI API host. Serves grok-4.7.
+	// APIHost is the public xAI API host. Bills as X API usage, so only Grok
+	// Imagine uses it.
 	APIHost = "api.x.ai"
-	// BuildProxyHost is the Grok Build chat proxy. Serves grok-4.7-build-fast,
-	// which the public API does not. Routing uses x-grok-model-override; the
-	// JSON model field is the same id.
+	// BuildProxyHost is the Grok Build chat proxy. Serves grok-4.7 and
+	// grok-4.7-build-fast and bills them as Grok Build usage. Routing uses
+	// x-grok-model-override; the JSON model field is the same id.
 	BuildProxyHost = "cli-chat-proxy.grok.com"
 	FastModelID    = "grok-4.7-build-fast"
 	// BuildProxyClientVersion must be sent: the Build proxy rejects requests
@@ -291,27 +292,39 @@ func ParseTokenResponse(data []byte, statusCode int, now time.Time, requireRefre
 	return Credentials{}, newAuthError(AuthErrTokenError, errCode)
 }
 
-// UpstreamHost keeps grok-4.7 on api.x.ai. The fast variant is a separate
-// model id on the Grok Build proxy, using the same SuperGrok OAuth bearer.
+// usesBuildProxy reports whether a model goes to the Grok Build proxy. Image
+// models are the only thing still sent to the public API: api.x.ai bills the
+// same OAuth bearer as X API usage, while the Build proxy bills it as Grok
+// Build.
+func usesBuildProxy(model string) bool {
+	return !strings.HasPrefix(model, "grok-imagine")
+}
+
+// UpstreamHost is the Grok Build proxy for every chat model and api.x.ai for
+// Grok Imagine.
 func UpstreamHost(model string) string {
-	if model == FastModelID {
+	if usesBuildProxy(model) {
 		return BuildProxyHost
 	}
 	return APIHost
 }
 
-// UpstreamAuthHeaders are the headers the Build proxy requires to route the
-// fast model. Empty for api.x.ai.
+// UpstreamAuthHeaders are the headers the Build proxy requires. Empty for
+// api.x.ai.
 func UpstreamAuthHeaders(model string) [][2]string {
-	if model != FastModelID {
+	if !usesBuildProxy(model) {
 		return nil
 	}
-	return [][2]string{
-		{"X-XAI-Token-Auth", "xai-grok-cli"},
-		{"x-grok-model-override", FastModelID},
-		{"x-grok-client-version", BuildProxyClientVersion},
-		{"x-grok-client-identifier", "grok-shell"},
+	headers := [][2]string{{"X-XAI-Token-Auth", "xai-grok-cli"}}
+	// The model id comes from the client's JSON body and is written into a raw
+	// HTTP header line, so a CR/LF in it would inject headers.
+	if model != "" && !strings.ContainsAny(model, "\r\n") {
+		headers = append(headers, [2]string{"x-grok-model-override", model})
 	}
+	return append(headers,
+		[2]string{"x-grok-client-version", BuildProxyClientVersion},
+		[2]string{"x-grok-client-identifier", "grok-shell"},
+	)
 }
 
 // NormalizeUpstreamPath normalizes a client path to /v1/... for api.x.ai,
