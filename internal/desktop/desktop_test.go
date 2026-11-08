@@ -138,6 +138,9 @@ func TestSystemdHelpers(t *testing.T) {
 }
 
 func TestUnderSystemd(t *testing.T) {
+	// GitHub Actions sets these; the function returns true before the runner is consulted.
+	t.Setenv("INVOCATION_ID", "")
+	t.Setenv("JOURNAL_STREAM", "")
 	f := withRunner(t, &fakeRunner{failRun: map[string]error{"systemctl --user is-system-running": errors.New("no manager")}})
 	if UnderSystemd() {
 		t.Error("UnderSystemd should be false when the user manager is unreachable")
@@ -160,14 +163,14 @@ func TestShellIPCIgnoresMissingBinary(t *testing.T) {
 
 func TestShellIPCSendsCommand(t *testing.T) {
 	f := withRunner(t, &fakeRunner{lookable: map[string]bool{"omarchy-shell": true}})
-	if err := DroidProxyIPC("toggleMenu"); err != nil {
-		t.Fatalf("DroidProxyIPC: %v", err)
+	if err := ShellIPC("nikships.droidproxy", "open"); err != nil {
+		t.Fatalf("ShellIPC: %v", err)
 	}
 	if len(f.runs) != 1 || f.runs[0].name != "omarchy-shell" {
 		t.Fatalf("unexpected runs: %+v", f.runs)
 	}
 	got := f.runs[0].args
-	if got[0] != "droidproxy" || got[1] != "toggleMenu" {
+	if got[0] != "nikships.droidproxy" || got[1] != "open" {
 		t.Fatalf("unexpected args: %v", got)
 	}
 }

@@ -87,7 +87,8 @@ jobs:
           tar -xzf "dist/droidproxy-$VERSION-linux-amd64.tar.gz" -C "$tmp"
           root="$tmp/droidproxy-$VERSION-linux-amd64"
           "$root/bin/droidproxy" version | tee /dev/stderr | grep -q "$VERSION"
-          "$root/libexec/cli-proxy-api" -h 2>&1 | head -n 1 | grep -q "CLIProxyAPI Version"
+          help="$("$root/libexec/cli-proxy-api" -h 2>&1 || true)"
+          printf '%s\n' "$help" | head -n 1 | grep -q "CLIProxyAPI Version"
           test -f "$root/share/plugin/manifest.json"
 
       - name: Sign

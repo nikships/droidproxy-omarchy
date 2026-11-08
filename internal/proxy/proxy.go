@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
+	"github.com/nikships/droidproxy-omarchy/internal/meta"
 	"github.com/nikships/droidproxy-omarchy/internal/prefs"
 )
 
@@ -48,6 +49,12 @@ type Proxy struct {
 	GrokAccessToken func() (string, error)
 	// MetaAPIKey returns the first usable Muse Model API key.
 	MetaAPIKey func() (string, bool)
+	// MetaUsageRecorder records a sniffed Meta usage snapshot. Defaults to
+	// the shared usage store; tests inject a stub.
+	MetaUsageRecorder func(accountID string, snapshot meta.UsageSnapshot)
+	// UsageEndpoint answers GET /droidproxy/usage locally; ok is false for
+	// every other path.
+	UsageEndpoint func(requestPath string) (status int, body []byte, ok bool)
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -225,13 +232,14 @@ func readHTTPRequest(conn net.Conn) ([]byte, error) {
 		}
 		if headerEnd >= 0 {
 			bodyReceived := len(buf) - headerEnd
-			if contentLength >= 0 {
-				if bodyReceived >= contentLength {
-					return buf[:headerEnd+contentLength], nil
-				}
-			} else if err == io.EOF {
-				// No Content-Length: body ends when the client closes.
+			if contentLength < 0 {
+				// No Content-Length: the request is complete at the header
+				// boundary. Waiting for EOF deadlocks clients that keep the
+				// connection open for the response (GET /v1/models).
 				return buf, nil
+			}
+			if bodyReceived >= contentLength {
+				return buf[:headerEnd+contentLength], nil
 			}
 		}
 		if err == io.EOF {

@@ -72,10 +72,13 @@ func (s ServiceType) DisplayName() string {
 
 // Account is one authenticated account (macOS AuthAccount).
 type Account struct {
-	ID       string // file name, or Meta account id
-	Email    string
-	Login    string // Copilot
-	Type     ServiceType
+	ID    string // file name, or Meta account id
+	Email string
+	Login string // Copilot
+	Type  ServiceType
+	// Expired is when the file's access token stops working. With a refresh
+	// token, CLIProxyAPI swaps in a new one on the account's next request, so
+	// this passing is not the account expiring.
 	Expired  *time.Time
 	FilePath string
 	Disabled bool
@@ -83,11 +86,20 @@ type Account struct {
 	OrganizationName string
 	// ClaudeSeatLabel is the classified seat suffix (e.g. "Personal Max").
 	ClaudeSeatLabel string
+	// CanRefresh means the file has a refresh token, so an expired access
+	// token is renewed on use.
+	CanRefresh bool
 }
 
-// IsExpired reports whether the account's expiry is in the past.
-func (a Account) IsExpired() bool {
+// IsAccessExpired reports whether the access token's expiry is in the past.
+func (a Account) IsAccessExpired() bool {
 	return a.Expired != nil && a.Expired.Before(time.Now())
+}
+
+// IsExpired reports whether the account can't be used again until the owner
+// signs in again.
+func (a Account) IsExpired() bool {
+	return a.IsAccessExpired() && !a.CanRefresh
 }
 
 // DisplayName matches AuthAccount.displayName.

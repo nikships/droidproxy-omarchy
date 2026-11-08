@@ -4,6 +4,7 @@ package usage
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"time"
 
@@ -19,6 +20,33 @@ type Window struct {
 	ResetText        string     `json:"resetText"`
 	UsedPercent      *float64   `json:"-"`
 	ResetDate        *time.Time `json:"-"`
+	// LengthSeconds is the window's full length when the payload or the
+	// bucket name states it (0 = unstated). It distinguishes plans with a
+	// short (5-hour-class) window from weekly-only plans.
+	LengthSeconds int `json:"-"`
+}
+
+// shortWindowMaxSeconds bounds a "short" window: the 5-hour class, with
+// slack for providers that round to 5–6 hours.
+const shortWindowMaxSeconds = 6 * 3600
+
+// HasShortWindow reports whether this account's plan includes a short
+// (5-hour-class) quota window, and whether the payload said so at all.
+// Weekly-only plans (Claude Max/Ultra class, GPT Pro) report (false, true);
+// an account whose windows carry no lengths or titles reports (false, false).
+func (a AccountUsage) HasShortWindow() (has, known bool) {
+	for _, w := range a.Windows {
+		switch {
+		case w.LengthSeconds > 0:
+			known = true
+			if w.LengthSeconds <= shortWindowMaxSeconds {
+				has = true
+			}
+		case w.Title == "5-hour":
+			has, known = true, true
+		}
+	}
+	return has, known
 }
 
 // AccountUsage is the usage snapshot for one account.
@@ -31,6 +59,16 @@ type AccountUsage struct {
 	Error        string     `json:"error"`
 	Windows      []Window   `json:"windows"`
 	UpdatedAt    *time.Time `json:"-"`
+	// RateLimited (HTTP 429) and RetryAfter drive the polling cache backoff.
+	RateLimited bool       `json:"-"`
+	RetryAfter  *time.Time `json:"-"`
+	// LocalFailure marks failures decided without an upstream request
+	// (missing/expired stored token): the cache must not reserve the
+	// polling budget for them, or a token renewed seconds later would
+	// still show the cached error until the reservation lapses.
+	LocalFailure bool `json:"-"`
+	// ResetCredits is the banked-reset state (Codex and Claude only).
+	ResetCredits *ResetCredits `json:"-"`
 }
 
 // newWindow builds a Window from a used percentage, computing the
@@ -81,6 +119,20 @@ func failedAccount(account auth.Account, message string) AccountUsage {
 		Error:        message,
 		UpdatedAt:    &now,
 	}
+}
+
+// localFailure is failedAccount for checks that never leave the machine.
+func localFailure(account auth.Account, message string) AccountUsage {
+	usage := failedAccount(account, message)
+	usage.LocalFailure = true
+	return usage
+}
+
+func failedResponse(account auth.Account, message string, status int, header http.Header) AccountUsage {
+	usage := failedAccount(account, message)
+	usage.RateLimited = status == http.StatusTooManyRequests
+	usage.RetryAfter = retryAfterDate(header.Get("Retry-After"), time.Now())
+	return usage
 }
 
 // authValues reads the auth file and returns its non-empty string fields.
