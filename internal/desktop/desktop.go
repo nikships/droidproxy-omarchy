@@ -218,21 +218,6 @@ func ShellIPC(target, method string, args ...string) error {
 	return err
 }
 
-// DroidProxyIPC calls the DroidProxy plugin's own IPC target.
-func DroidProxyIPC(method string, args ...string) error {
-	return ShellIPC(buildinfoPluginTarget(), method, args...)
-}
-
-// The plugin registers target "droidproxy" with methods openWebUI (plus the
-// legacy openSettings alias) and ping.
-func buildinfoPluginTarget() string { return "droidproxy" }
-
-// OpenSettings asks the plugin to open the settings web app. Prefer opening
-// the web UI URL directly (cmdOpen does); this is the shell-IPC path.
-func OpenSettings() error {
-	return DroidProxyIPC("openWebUI")
-}
-
 // EnsureDirs creates the runtime directories the desktop helpers assume.
 func EnsureDirs() error {
 	return paths.EnsureDir(paths.RuntimeDir(), 0o700)

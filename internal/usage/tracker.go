@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/nikships/droidproxy-omarchy/internal/grok"
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
 	"github.com/nikships/droidproxy-omarchy/internal/meta"
+	"github.com/nikships/droidproxy-omarchy/internal/paths"
 )
 
 const (
@@ -55,6 +57,11 @@ type Tracker struct {
 	// metaSnapshots reads last-observed Meta usage. Defaults to the shared
 	// store; tests inject an in-memory stub.
 	metaSnapshots func(accountID string) *meta.UsageSnapshot
+	// probeMeta refreshes a stale Meta snapshot before it is read. Defaults to
+	// a live api.meta.ai probe; tests inject a stub.
+	probeMeta func(accountID string) meta.ProbeOutcome
+
+	cache *usageCache
 }
 
 // NewTracker creates a tracker with the default HTTP client and endpoints.
@@ -67,6 +74,10 @@ func NewTracker() *Tracker {
 		grokUsageURL:   grokUsageEndpoint,
 		grokToken:      grok.AccessToken,
 		metaSnapshots:  func(accountID string) *meta.UsageSnapshot { return meta.SharedUsageStore().Snapshot(accountID) },
+		probeMeta:      func(accountID string) meta.ProbeOutcome { return meta.NewUsageProber().Probe(accountID, false) },
+		cache: newUsageCache(filepath.Join(paths.DataDir(), "usage-cache.json"), time.Now, func() time.Duration {
+			return time.Duration(rand.Int64N(int64(30 * time.Second)))
+		}),
 	}
 }
 
@@ -103,6 +114,13 @@ func (t *Tracker) SetMetaSnapshots(fn func(accountID string) *meta.UsageSnapshot
 	t.mu.Unlock()
 }
 
+// SetMetaProbe injects the stale-snapshot Meta probe (tests only).
+func (t *Tracker) SetMetaProbe(fn func(accountID string) meta.ProbeOutcome) {
+	t.mu.Lock()
+	t.probeMeta = fn
+	t.mu.Unlock()
+}
+
 // SetOnChange registers a callback invoked whenever the snapshot changes
 // (refresh started or completed).
 func (t *Tracker) SetOnChange(fn func()) {
@@ -131,23 +149,7 @@ func (t *Tracker) IsRefreshing() bool {
 // accounts are skipped (Meta ignores key expiry: a stale card still shows its
 // "as of" time), and an empty selection clears the snapshot.
 func (t *Tracker) Refresh(codexAccounts, claudeAccounts, grokAccounts, metaAccounts []auth.Account) {
-	var enabled []auth.Account
-	for _, a := range codexAccounts {
-		if !a.Disabled && !a.IsExpired() {
-			enabled = append(enabled, a)
-		}
-	}
-	for _, a := range claudeAccounts {
-		if !a.Disabled && !a.IsExpired() {
-			enabled = append(enabled, a)
-		}
-	}
-	enabled = append(enabled, activeGrokAccounts(grokAccounts)...)
-	for _, a := range metaAccounts {
-		if !a.Disabled {
-			enabled = append(enabled, a)
-		}
-	}
+	enabled := eligibleAccounts(codexAccounts, claudeAccounts, grokAccounts, metaAccounts)
 
 	t.mu.Lock()
 	t.generation++
@@ -175,33 +177,14 @@ func (t *Tracker) Refresh(codexAccounts, claudeAccounts, grokAccounts, metaAccou
 		notify()
 	}
 
-	results := make([]AccountUsage, len(enabled))
-	var wg sync.WaitGroup
-	for i, account := range enabled {
-		wg.Add(1)
-		go func(i int, account auth.Account) {
-			defer wg.Done()
-			switch account.Type {
-			case auth.Claude:
-				results[i] = t.fetchClaudeUsage(account, generation)
-			case auth.Grok:
-				results[i] = t.fetchGrokUsage(account)
-			case auth.Meta:
-				results[i] = t.fetchMetaUsage(account)
-			default:
-				results[i] = t.fetchCodexUsage(account, generation)
-			}
-		}(i, account)
-	}
-
 	go func() {
-		wg.Wait()
+		results := t.fetch(enabled)
 		t.mu.Lock()
 		if generation != t.generation {
 			t.mu.Unlock()
 			return
 		}
-		t.accounts = sortAccountUsages(results)
+		t.accounts = results
 		t.refreshin = false
 		notify := t.onChange
 		t.mu.Unlock()
@@ -209,6 +192,50 @@ func (t *Tracker) Refresh(codexAccounts, claudeAccounts, grokAccounts, metaAccou
 			notify()
 		}
 	}()
+}
+
+// eligibleAccounts keeps the accounts usage is read for. Disabled and expired
+// accounts are skipped; Meta ignores key expiry, since a stale card still
+// shows its "as of" time.
+func eligibleAccounts(codexAccounts, claudeAccounts, grokAccounts, metaAccounts []auth.Account) []auth.Account {
+	var enabled []auth.Account
+	for _, a := range append(append([]auth.Account(nil), codexAccounts...), claudeAccounts...) {
+		if !a.Disabled && !a.IsExpired() {
+			enabled = append(enabled, a)
+		}
+	}
+	enabled = append(enabled, activeGrokAccounts(grokAccounts)...)
+	for _, a := range metaAccounts {
+		if !a.Disabled {
+			enabled = append(enabled, a)
+		}
+	}
+	return enabled
+}
+
+// fetch reads usage for already-filtered accounts concurrently and returns
+// the sorted results.
+func (t *Tracker) fetch(accounts []auth.Account) []AccountUsage {
+	results := make([]AccountUsage, len(accounts))
+	var wg sync.WaitGroup
+	for i, account := range accounts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			switch account.Type {
+			case auth.Claude:
+				results[i] = t.cache.usage(account, func() AccountUsage { return t.fetchClaudeUsage(account) })
+			case auth.Grok:
+				results[i] = t.cache.usage(account, func() AccountUsage { return t.fetchGrokUsage(account) })
+			case auth.Meta:
+				results[i] = t.cache.usage(account, func() AccountUsage { return t.fetchMetaUsage(account) })
+			default:
+				results[i] = t.cache.usage(account, func() AccountUsage { return t.fetchCodexUsage(account) })
+			}
+		}()
+	}
+	wg.Wait()
+	return sortAccountUsages(results)
 }
 
 // UpdateMetaAccounts replaces only the Meta cards from the local
@@ -219,7 +246,14 @@ func (t *Tracker) UpdateMetaAccounts(metaAccounts []auth.Account) {
 	var fresh []AccountUsage
 	for _, a := range metaAccounts {
 		if !a.Disabled {
-			fresh = append(fresh, t.fetchMetaUsage(a))
+			usage := t.storedMetaUsage(a)
+			if usage.Error == "" {
+				// Keep the polling cache in step with the live sample so
+				// endpoint reads and the next refresh cannot resurrect
+				// the older one.
+				t.cache.recordObserved(a, usage)
+			}
+			fresh = append(fresh, usage)
 		}
 	}
 	t.mu.Lock()
@@ -307,38 +341,41 @@ func errText(err error) string {
 	return err.Error()
 }
 
-func doJSON(client *http.Client, request *http.Request) ([]byte, int, error) {
+func doJSON(client *http.Client, request *http.Request) ([]byte, int, http.Header, error) {
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, response.StatusCode, err
+		return nil, response.StatusCode, response.Header, err
 	}
-	return data, response.StatusCode, nil
+	return data, response.StatusCode, response.Header, nil
 }
 
 // Codex.
 
-func (t *Tracker) fetchCodexUsage(account auth.Account, generation int) AccountUsage {
+func (t *Tracker) fetchCodexUsage(account auth.Account) AccountUsage {
 	authData, ok := authValues(account.FilePath)
 	if !ok {
-		return failedAccount(account, "Missing access token")
+		return localFailure(account, "Missing access token")
 	}
 	token, ok := authData["access_token"]
 	if !ok {
-		return failedAccount(account, "Missing access token")
+		return localFailure(account, "Missing access token")
+	}
+	if account.IsAccessExpired() {
+		return localFailure(account, "Access token expired; it renews on this account's next request")
 	}
 	client, endpoint := t.clientAndURL("codex")
 	if _, err := url.Parse(endpoint); err != nil {
-		return failedAccount(account, "Invalid usage endpoint")
+		return localFailure(account, "Invalid usage endpoint")
 	}
 
 	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
-		return failedAccount(account, "Invalid usage endpoint")
+		return localFailure(account, "Invalid usage endpoint")
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Accept", "application/json")
@@ -347,16 +384,25 @@ func (t *Tracker) fetchCodexUsage(account auth.Account, generation int) AccountU
 		request.Header.Set("ChatGPT-Account-Id", accountID)
 	}
 
-	return t.fetchJSONUsage(account, client, request, parseCodexWindows)
+	usage := t.fetchJSONUsage(account, client, request, parseCodexWindows)
+	if usage.Error == "" {
+		credits, limited, retryAfter := t.fetchCodexResetCredits(account)
+		usage.ResetCredits = credits
+		if limited {
+			usage.RateLimited = true
+			usage.RetryAfter = retryAfter
+		}
+	}
+	return usage
 }
 
 func (t *Tracker) fetchJSONUsage(account auth.Account, client *http.Client, request *http.Request, parse func(any) []Window) AccountUsage {
-	data, status, err := doJSON(client, request)
+	data, status, header, err := doJSON(client, request)
 	if err != nil {
 		return failedAccount(account, errText(err))
 	}
 	if status < 200 || status >= 300 {
-		return failedAccount(account, fmt.Sprintf("Usage API returned %d", status))
+		return failedResponse(account, fmt.Sprintf("Usage API returned %d", status), status, header)
 	}
 	var body any
 	if err := json.Unmarshal(data, &body); err != nil {
@@ -382,17 +428,17 @@ func (t *Tracker) fetchGrokUsage(account auth.Account) AccountUsage {
 
 	client, endpoint := t.clientAndURL("grok")
 	if _, err := url.Parse(endpoint); err != nil {
-		return failedAccount(account, "Invalid usage endpoint")
+		return localFailure(account, "Invalid usage endpoint")
 	}
 	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
-		return failedAccount(account, "Invalid usage endpoint")
+		return localFailure(account, "Invalid usage endpoint")
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
 	request.Header.Set("Accept", "application/json")
 
-	data, status, err := doJSON(client, request)
+	data, status, header, err := doJSON(client, request)
 	if err != nil {
 		return failedAccount(account, errText(err))
 	}
@@ -402,7 +448,7 @@ func (t *Tracker) fetchGrokUsage(account auth.Account) AccountUsage {
 		return failedAccount(account, fmt.Sprintf("Grok rejected the stored credentials (HTTP %d). Reconnect Grok in Settings.", status))
 	}
 	if status < 200 || status >= 300 {
-		return failedAccount(account, fmt.Sprintf("Grok usage API returned %d", status))
+		return failedResponse(account, fmt.Sprintf("Grok usage API returned %d", status), status, header)
 	}
 	windows := ParseGrokWindows(data)
 	if len(windows) == 0 {
@@ -413,12 +459,29 @@ func (t *Tracker) fetchGrokUsage(account auth.Account) AccountUsage {
 
 // Meta.
 
-// fetchMetaUsage reads the local last-observed store only. Meta has no usage
-// endpoint: the 5-hour window and weekly percents arrive as
-// `response.subscription_usage` SSE events that ThinkingProxy sniffs into the
-// store, so unlike the other providers this never touches the network and
-// only the account serving Responses traffic ever gets observations.
+// fetchMetaUsage probes for a fresh snapshot when the stored one is stale,
+// then reads the store. Meta has no usage endpoint: the 5-hour window and
+// weekly percents arrive as `response.subscription_usage` SSE events that
+// ThinkingProxy sniffs into the store and the probe requests. A failed probe
+// or expired key falls back to the stored snapshot, so a stale card still
+// shows its "as of" time.
 func (t *Tracker) fetchMetaUsage(account auth.Account) AccountUsage {
+	t.mu.Lock()
+	probe := t.probeMeta
+	t.mu.Unlock()
+	outcome := probe(account.ID)
+	usage := t.storedMetaUsage(account)
+	if outcome.RateLimited {
+		// The stored snapshot still serves, but the cache must honor
+		// the provider cooldown instead of the 60s probe interval.
+		usage.RateLimited = true
+		usage.RetryAfter = retryAfterDate(outcome.RetryAfter, time.Now())
+	}
+	return usage
+}
+
+// storedMetaUsage is the account's last observed Meta usage, without probing.
+func (t *Tracker) storedMetaUsage(account auth.Account) AccountUsage {
 	t.mu.Lock()
 	readSnapshot := t.metaSnapshots
 	t.mu.Unlock()
@@ -438,14 +501,14 @@ func (t *Tracker) fetchMetaUsage(account auth.Account) AccountUsage {
 
 // Claude.
 
-func (t *Tracker) fetchClaudeUsage(account auth.Account, generation int) AccountUsage {
+func (t *Tracker) fetchClaudeUsage(account auth.Account) AccountUsage {
 	authData, ok := authValues(account.FilePath)
 	if !ok {
-		return failedAccount(account, "Missing access token")
+		return localFailure(account, "Missing access token")
 	}
 	token, ok := authData["access_token"]
 	if !ok {
-		return failedAccount(account, "Missing access token")
+		return localFailure(account, "Missing access token")
 	}
 
 	client, endpoint := t.clientAndURL("claude")
@@ -463,28 +526,28 @@ func (t *Tracker) fetchClaudeUsage(account auth.Account, generation int) Account
 		}
 		token = newToken
 	}
-	return t.executeClaudeUsageRequest(account, client, endpoint, token, generation)
+	return t.executeClaudeUsageRequest(account, client, endpoint, token)
 }
 
-func (t *Tracker) executeClaudeUsageRequest(account auth.Account, client *http.Client, endpoint, token string, generation int) AccountUsage {
-	data, status, err := doJSON(client, makeClaudeUsageRequest(endpoint, token))
+func (t *Tracker) executeClaudeUsageRequest(account auth.Account, client *http.Client, endpoint, token string) AccountUsage {
+	data, status, header, err := doJSON(client, makeClaudeUsageRequest(endpoint, token))
 	if err != nil {
 		return failedAccount(account, errText(err))
 	}
 	if status == 401 || status == 403 {
-		return t.retryClaudeUsageAfterRefresh(account, client, endpoint, generation)
+		return t.retryClaudeUsageAfterRefresh(account, client, endpoint)
 	}
 	if status < 200 || status >= 300 {
-		return failedAccount(account, fmt.Sprintf("Claude usage API returned %d", status))
+		return failedResponse(account, fmt.Sprintf("Claude usage API returned %d", status), status, header)
 	}
 	windows := ParseClaudeWindows(data)
 	if len(windows) == 0 {
 		return failedAccount(account, "Usage response did not include quota windows")
 	}
-	return successAccount(account, windows)
+	return claudeSuccess(account, data, windows)
 }
 
-func (t *Tracker) retryClaudeUsageAfterRefresh(account auth.Account, client *http.Client, endpoint string, generation int) AccountUsage {
+func (t *Tracker) retryClaudeUsageAfterRefresh(account auth.Account, client *http.Client, endpoint string) AccountUsage {
 	if _, ok := authValues(account.FilePath); !ok {
 		return failedAccount(account, "Failed to read credentials for retry")
 	}
@@ -492,21 +555,29 @@ func (t *Tracker) retryClaudeUsageAfterRefresh(account auth.Account, client *htt
 	if err != nil {
 		return failedAccount(account, "Retry token refresh failed: "+err.Error())
 	}
-	data, status, err := doJSON(client, makeClaudeUsageRequest(endpoint, newToken))
+	data, status, header, err := doJSON(client, makeClaudeUsageRequest(endpoint, newToken))
 	if err != nil || data == nil {
 		return failedAccount(account, "No HTTP response on retry")
 	}
 	if status != 200 {
-		return failedAccount(account, fmt.Sprintf("Claude usage returned %d after refresh retry", status))
+		return failedResponse(account, fmt.Sprintf("Claude usage returned %d after refresh retry", status), status, header)
 	}
 	windows := ParseClaudeWindows(data)
 	if len(windows) == 0 {
 		return failedAccount(account, "Usage response did not include quota windows")
 	}
-	return successAccount(account, windows)
+	return claudeSuccess(account, data, windows)
 }
 
 func makeClaudeUsageRequest(endpoint, token string) *http.Request {
+	// cedar_ember=1 asks the usage payload to include banked-reset grants.
+	if parsed, err := url.Parse(endpoint); err == nil {
+		query := parsed.Query()
+		query.Set("cedar_ember", "1")
+		query.Set("skip_spend", "1")
+		parsed.RawQuery = query.Encode()
+		endpoint = parsed.String()
+	}
 	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil
@@ -514,6 +585,12 @@ func makeClaudeUsageRequest(endpoint, token string) *http.Request {
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("anthropic-beta", "oauth-2025-04-20")
 	return request
+}
+
+func claudeSuccess(account auth.Account, data []byte, windows []Window) AccountUsage {
+	usage := successAccount(account, windows)
+	usage.ResetCredits = parseClaudeResetCredits(data, time.Now())
+	return usage
 }
 
 // refreshClaudeTokens refreshes the OAuth tokens for an auth file, rewrites
@@ -537,7 +614,7 @@ func (t *Tracker) refreshClaudeTokens(filePath string) (string, error) {
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	data, status, err := doJSON(client, request)
+	data, status, _, err := doJSON(client, request)
 	if err != nil || status != 200 {
 		return "", errors.New("Token refresh failed")
 	}

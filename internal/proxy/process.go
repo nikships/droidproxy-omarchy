@@ -12,6 +12,8 @@ import (
 )
 
 var antigravityModelAliases = map[string]string{
+	"ag-c55s-high":     "claude-sonnet-5-5-high",
+	"ag-c55o-high":     "claude-opus-5-5-high",
 	"ag-c46s-thinking": "claude-sonnet-4-6",
 	"ag-c46o-thinking": "claude-opus-4-6-thinking",
 }
@@ -41,6 +43,13 @@ func (p *Proxy) processRequest(data []byte, conn net.Conn) {
 	}
 	method, path, httpVersion := parts[0], parts[1], parts[2]
 	logx.Logf("[ThinkingProxy] Incoming request: %s %s", method, path)
+
+	if method == "GET" && p.UsageEndpoint != nil {
+		if status, body, ok := p.UsageEndpoint(path); ok {
+			sendJSON(conn, status, body)
+			return
+		}
+	}
 
 	var headers [][2]string
 	for _, line := range lines[1:] {
@@ -106,14 +115,6 @@ func (p *Proxy) processRequest(data []byte, conn net.Conn) {
 		if result, ok := processOpenAIFastMode(modifiedBody, rewrittenPath, fields, hasFields); ok {
 			modifiedBody = result
 			fields, hasFields = inspectRequestJSONFields(modifiedBody)
-		}
-		if hasFields && fields.hasModel && isClaudeModel(fields.model) {
-			sanitizedBody := claude.SanitizeThinkingBlocks(modifiedBody)
-			if sanitizedBody != modifiedBody {
-				logx.Debugf("SANITIZED CLAUDE THINKING BLOCKS: stripped stale assistant thinking before forwarding")
-				modifiedBody = sanitizedBody
-				fields, hasFields = inspectRequestJSONFields(modifiedBody)
-			}
 		}
 		if summary := reasoningSummaryLog(modifiedBody, fields); summary != "" {
 			logx.Debugf("REQUEST REASONING: %s", summary)
@@ -229,8 +230,12 @@ func processOpenAIFastMode(jsonString, path string, fields requestJSONFields, ha
 		if !prefs.GPT6AstraFastMode() {
 			return "", false
 		}
-	case "gpt-6-sol":
-		if !prefs.GPT6SolFastMode() {
+	case "gpt-6.1-sol":
+		if !prefs.GPT61SolFastMode() {
+			return "", false
+		}
+	case "gpt-6.1-terra":
+		if !prefs.GPT61TerraFastMode() {
 			return "", false
 		}
 	case "gpt-6-luna":

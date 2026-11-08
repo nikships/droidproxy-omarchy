@@ -163,14 +163,14 @@ func TestShellIPCIgnoresMissingBinary(t *testing.T) {
 
 func TestShellIPCSendsCommand(t *testing.T) {
 	f := withRunner(t, &fakeRunner{lookable: map[string]bool{"omarchy-shell": true}})
-	if err := DroidProxyIPC("openWebUI"); err != nil {
-		t.Fatalf("DroidProxyIPC: %v", err)
+	if err := ShellIPC("nikships.droidproxy", "open"); err != nil {
+		t.Fatalf("ShellIPC: %v", err)
 	}
 	if len(f.runs) != 1 || f.runs[0].name != "omarchy-shell" {
 		t.Fatalf("unexpected runs: %+v", f.runs)
 	}
 	got := f.runs[0].args
-	if got[0] != "droidproxy" || got[1] != "openWebUI" {
+	if got[0] != "nikships.droidproxy" || got[1] != "open" {
 		t.Fatalf("unexpected args: %v", got)
 	}
 }

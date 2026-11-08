@@ -239,6 +239,7 @@ func (m *Manager) parseAccount(path, name string) (Account, bool) {
 		Disabled:         boolField(jsonData, "disabled"),
 		OrganizationName: organizationName,
 		ClaudeSeatLabel:  claudeSeatLabel,
+		CanRefresh:       stringField(jsonData, "refresh_token") != "",
 	}
 	return account, true
 }

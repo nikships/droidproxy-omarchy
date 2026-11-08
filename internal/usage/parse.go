@@ -12,15 +12,20 @@ import (
 )
 
 // knownClaudeBuckets are the Claude usage buckets we surface, in display
-// order. Unknown buckets are ignored.
-var knownClaudeBuckets = []struct{ key, title string }{
-	{"five_hour", "5-hour"},
-	{"seven_day", "Weekly"},
-	{"seven_day_opus", "Weekly (Opus)"},
-	{"seven_day_sonnet", "Weekly (Sonnet)"},
-	{"seven_day_oauth_apps", "Weekly (OAuth Apps)"},
-	{"seven_day_cowork", "Weekly (Cowork)"},
-	{"seven_day_omelette", "Weekly (Omelette)"},
+// order. Unknown buckets are ignored. A plan without that limit sends the
+// bucket as null; an idle plan with the limit sends the bucket with
+// utilization 0, so bucket presence alone states the window exists.
+var knownClaudeBuckets = []struct {
+	key, title    string
+	lengthSeconds int
+}{
+	{"five_hour", "5-hour", 5 * 3600},
+	{"seven_day", "Weekly", 7 * 86400},
+	{"seven_day_opus", "Weekly (Opus)", 7 * 86400},
+	{"seven_day_sonnet", "Weekly (Sonnet)", 7 * 86400},
+	{"seven_day_oauth_apps", "Weekly (OAuth Apps)", 7 * 86400},
+	{"seven_day_cowork", "Weekly (Cowork)", 7 * 86400},
+	{"seven_day_omelette", "Weekly (Omelette)", 7 * 86400},
 }
 
 // ParseClaudeWindows parses the Claude OAuth usage payload. The API defines
@@ -55,7 +60,9 @@ func ParseClaudeWindows(data []byte) []Window {
 		if resetDate != nil {
 			resetText = ResetTextFor(*resetDate)
 		}
-		windows = append(windows, newWindow(bucket.title, &usedPercent, resetText, resetDate))
+		w := newWindow(bucket.title, &usedPercent, resetText, resetDate)
+		w.LengthSeconds = bucket.lengthSeconds
+		windows = append(windows, w)
 	}
 	return windows
 }
@@ -131,10 +138,11 @@ func ParseMetaWindows(snapshot meta.UsageSnapshot, now time.Time) []Window {
 	weeklyReset := ResetTextForAt(snapshot.WeeklyResetsAt, now) + " · as of " + observed
 	shortUsed := snapshot.WindowUsedPercent
 	weeklyUsed := snapshot.WeeklyUsedPercent
-	return []Window{
-		newWindow(shortTitle, &shortUsed, shortReset, &snapshot.WindowResetsAt),
-		newWindow("Weekly", &weeklyUsed, weeklyReset, &snapshot.WeeklyResetsAt),
-	}
+	short := newWindow(shortTitle, &shortUsed, shortReset, &snapshot.WindowResetsAt)
+	short.LengthSeconds = int(snapshot.WindowDurationMins * 60)
+	weekly := newWindow("Weekly", &weeklyUsed, weeklyReset, &snapshot.WeeklyResetsAt)
+	weekly.LengthSeconds = 7 * 86400
+	return []Window{short, weekly}
 }
 
 // MetaWindowTitle names the short Meta window from its duration in minutes
@@ -158,13 +166,36 @@ func parseCodexWindows(root any) []Window {
 	}
 
 	var windows []Window
-	if w := codexWindow("5-hour", rateLimit["primary_window"]); w != nil {
+	if w := codexWindow(codexWindowTitle(rateLimit["primary_window"], "5-hour"), rateLimit["primary_window"]); w != nil {
 		windows = append(windows, *w)
 	}
-	if w := codexWindow("Weekly", rateLimit["secondary_window"]); w != nil {
+	if w := codexWindow(codexWindowTitle(rateLimit["secondary_window"], "Weekly"), rateLimit["secondary_window"]); w != nil {
 		windows = append(windows, *w)
 	}
 	return windows
+}
+
+// codexWindowTitle names a window by its length, not its slot: plans
+// without a 5-hour limit (such as prolite) report their only window in the
+// primary slot with a weekly limit_window_seconds. Payloads without a
+// length keep the positional fallback.
+func codexWindowTitle(value any, fallback string) string {
+	window, ok := value.(map[string]any)
+	if !ok {
+		return fallback
+	}
+	length, has := numberValue(window["limit_window_seconds"])
+	if !has || length <= 0 {
+		return fallback
+	}
+	switch {
+	case length >= 6*86400:
+		return "Weekly"
+	case length <= 6*3600:
+		return "5-hour"
+	default:
+		return "Window"
+	}
 }
 
 func codexWindow(title string, value any) *Window {
@@ -175,6 +206,9 @@ func codexWindow(title string, value any) *Window {
 	resetDate := resetDateFromDict(window)
 	usedPercent, hasUsed := numberValue(window["used_percent"])
 	w := Window{Title: title, ResetDate: resetDate}
+	if length, has := numberValue(window["limit_window_seconds"]); has && length > 0 {
+		w.LengthSeconds = int(length)
+	}
 	if hasUsed {
 		w.UsedPercent = &usedPercent
 		remaining := 100 - usedPercent

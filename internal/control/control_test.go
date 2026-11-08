@@ -332,7 +332,7 @@ func sampleState() State {
 		},
 		Server: ServerState{Running: true, ProxyPort: 8317, BackendPort: 8318, URL: "http://localhost:8317"},
 		Settings: Settings{
-			LaunchAtLogin: true, BackgroundOpacity: 0.55,
+			LaunchAtLogin:    true,
 			AutoCheckUpdates: true,
 		},
 		Paths:     PathsInfo{AuthDir: "/home/u/.cli-proxy-api"},

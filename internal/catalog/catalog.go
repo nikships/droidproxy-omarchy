@@ -111,11 +111,12 @@ func (d ModelDefinition) SettingsEntry() map[string]any {
 const GrokFastModelID = "grok-4.7-build-fast"
 
 var (
-	levelLow    = ThinkingLevel{"low", "Low"}
-	levelMedium = ThinkingLevel{"medium", "Medium"}
-	levelHigh   = ThinkingLevel{"high", "High"}
-	levelXHigh  = ThinkingLevel{"xhigh", "xHigh"}
-	levelMax    = ThinkingLevel{"max", "Max"}
+	levelMinimal = ThinkingLevel{"minimal", "Minimal"}
+	levelLow     = ThinkingLevel{"low", "Low"}
+	levelMedium  = ThinkingLevel{"medium", "Medium"}
+	levelHigh    = ThinkingLevel{"high", "High"}
+	levelXHigh   = ThinkingLevel{"xhigh", "xHigh"}
+	levelMax     = ThinkingLevel{"max", "Max"}
 )
 
 func claudeAdvancedLevels() []ThinkingLevel {
@@ -130,14 +131,14 @@ func gpt6Levels() []ThinkingLevel {
 	return []ThinkingLevel{levelLow, levelMedium, levelHigh, levelXHigh, levelMax}
 }
 
-// museLevels is the reasoning range the `muse` CLI exposes for Muse Spark
-// (none|minimal|low|medium|high|xhigh|max|ultra) minus none/minimal/ultra,
-// which aren't meaningful defaults for a coding model.
+// museLevels is every reasoning effort api.meta.ai accepts for Muse Wonder
+// (verified live for both variants: minimal through max return 200; none and
+// ultra return 400, so they are not advertised).
 func museLevels() []ThinkingLevel {
-	return []ThinkingLevel{levelLow, levelMedium, levelHigh, levelXHigh, levelMax}
+	return []ThinkingLevel{levelMinimal, levelLow, levelMedium, levelHigh, levelXHigh, levelMax}
 }
 
-// MuseModel builds Muse Spark 1.3 or its cheaper/faster "contributor"
+// MuseModel builds a Muse Wonder model or its cheaper/faster "contributor"
 // companion. Completions go through CLIProxyAPI's openai-compatibility
 // passthrough; Responses are TLS-forwarded by ThinkingProxy to
 // https://api.meta.ai/v1 so encrypted reasoning persists across turns.
@@ -157,8 +158,9 @@ func MuseModel(baseModel, idSlug, displayName string) ModelDefinition {
 	}
 }
 
-// antigravityModel defaults: 65536 output tokens, [high], default "high".
-func antigravityModel(baseModel, idSlug, displayName string, maxOutputTokens int, levels []ThinkingLevel, defaultLevel string) ModelDefinition {
+// antigravityModel defaults: 65536 output tokens, no context limit, [high],
+// default "high".
+func antigravityModel(baseModel, idSlug, displayName string, maxOutputTokens, maxContextLimit int, levels []ThinkingLevel, defaultLevel string) ModelDefinition {
 	if maxOutputTokens == 0 {
 		maxOutputTokens = 65536
 	}
@@ -173,6 +175,7 @@ func antigravityModel(baseModel, idSlug, displayName string, maxOutputTokens int
 		IDSlug:            idSlug,
 		DisplayName:       displayName,
 		MaxOutputTokens:   maxOutputTokens,
+		MaxContextLimit:   maxContextLimit,
 		Provider:          "openai",
 		ProviderKey:       "antigravity",
 		BaseURL:           "http://localhost:8317/v1",
@@ -225,8 +228,14 @@ func Definitions() []ModelDefinition {
 			Levels: claudeAdvancedLevels(), DefaultLevelValue: "xhigh",
 		},
 		{
-			BaseModel: "claude-sonnet-5", IDSlug: "sonnet-5", DisplayName: "Sonnet 5",
+			BaseModel: "claude-sonnet-5-5", IDSlug: "sonnet-5-5", DisplayName: "Sonnet 5.5",
 			MaxOutputTokens: 128000, Provider: "anthropic", ProviderKey: "claude",
+			BaseURL: "http://localhost:8317", Kind: KindClaudeAdaptive,
+			Levels: claudeAdvancedLevels(), DefaultLevelValue: "xhigh",
+		},
+		{
+			BaseModel: "claude-haiku-5-5", IDSlug: "haiku-5-5", DisplayName: "Haiku 5.5",
+			MaxOutputTokens: 128000, MaxContextLimit: 1_000_000, Provider: "anthropic", ProviderKey: "claude",
 			BaseURL: "http://localhost:8317", Kind: KindClaudeAdaptive,
 			Levels: claudeAdvancedLevels(), DefaultLevelValue: "xhigh",
 		},
@@ -239,7 +248,13 @@ func Definitions() []ModelDefinition {
 			Levels: gpt6Levels(), DefaultLevelValue: "xhigh",
 		},
 		{
-			BaseModel: "gpt-6-sol", IDSlug: "gpt-6-sol", DisplayName: "GPT 6 Sol",
+			BaseModel: "gpt-6.1-sol", IDSlug: "gpt-6.1-sol", DisplayName: "GPT 6.1 Sol",
+			MaxOutputTokens: 128000, MaxContextLimit: 272_000, Provider: "openai", ProviderKey: "codex",
+			BaseURL: "http://localhost:8317/v1", Kind: KindCodex,
+			Levels: gpt6Levels(), DefaultLevelValue: "xhigh",
+		},
+		{
+			BaseModel: "gpt-6.1-terra", IDSlug: "gpt-6.1-terra", DisplayName: "GPT 6.1 Terra",
 			MaxOutputTokens: 128000, MaxContextLimit: 272_000, Provider: "openai", ProviderKey: "codex",
 			BaseURL: "http://localhost:8317/v1", Kind: KindCodex,
 			Levels: gpt6Levels(), DefaultLevelValue: "xhigh",
@@ -254,15 +269,34 @@ func Definitions() []ModelDefinition {
 		// Antigravity subscription models go through the antigravity executor
 		// via OpenAI-compatible chat-completions: provider="openai" plus a
 		// baseURL ending in /v1 makes Droid send POST /v1/chat/completions.
-		antigravityModel("gemini-pro-agent", "antigravity-gemini-3.1-pro", "Gemini 3.1 Pro (High)", 0, nil, ""),
-		antigravityModel("gemini-3.1-pro-low", "gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)", 0, []ThinkingLevel{levelLow}, "low"),
-		antigravityModel("gemini-3.8-flash-high", "gemini-3.8-flash-high", "Gemini 3.8 Flash (High)", 0, nil, ""),
-		antigravityModel("ag-c46s-thinking", "ag-c46s-thinking", "Claude Sonnet 4.6 (Thinking)", 64000, nil, ""),
-		antigravityModel("ag-c46o-thinking", "ag-c46o-thinking", "Claude Opus 4.6 (Thinking)", 64000, nil, ""),
-		antigravityModel("gpt-oss-120b-medium", "gpt-oss-120b-medium", "GPT-OSS 120B (Medium)", 32768, []ThinkingLevel{levelMedium}, "medium"),
+		antigravityModel("gemini-3.8-flash-high", "gemini-3.8-flash-high", "Gemini 3.8 Flash (High)", 0, 0, nil, ""),
+		// Only the -high id is in the CLIProxyAPI registry. reasoning_effort still
+		// selects low, medium, or high thinking on it (verified live 2026-10-29).
+		antigravityModel("gemini-4-argon-high", "gemini-4-argon-high", "Gemini 4 Argon", 0, 0, []ThinkingLevel{levelLow, levelMedium, levelHigh}, ""),
+		// Claude 5.5 is only served to directly billed (non-trial) Google AI
+		// Pro/Ultra accounts. CLIProxyAPI registers an Antigravity model only when
+		// the account's fetchAvailableModels returns it, so on other accounts the
+		// 5.5 entries fail with `unknown provider for model`; those accounts use
+		// the 4.6 entries below.
+		antigravityModel("ag-c55s-high", "ag-c55s-high", "Claude Sonnet 5.5 (High)", 128000, 1_000_000, nil, ""),
+		antigravityModel("ag-c55o-high", "ag-c55o-high", "Claude Opus 5.5 (High)", 128000, 1_000_000, nil, ""),
+		antigravityModel("ag-c46s-thinking", "ag-c46s-thinking", "Claude Sonnet 4.6 (Thinking)", 64000, 0, nil, ""),
+		antigravityModel("ag-c46o-thinking", "ag-c46o-thinking", "Claude Opus 4.6 (Thinking)", 64000, 0, nil, ""),
 
-		// CLIProxyAPI recognizes this catalog ID and removes the `kimi-`
-		// prefix, sending Kimi Code's native `k3` model ID upstream.
+		// CLIProxyAPI recognizes these catalog IDs and removes the `kimi-`
+		// prefix, sending Kimi Code's native model ID upstream.
+		{
+			BaseModel: "kimi-k3.1-pro", IDSlug: "kimi-k3.1-pro", DisplayName: "Kimi K3.1 Pro",
+			MaxOutputTokens: 65536, Provider: "openai", ProviderKey: "kimi",
+			BaseURL: "http://localhost:8317/v1", Kind: KindKimi,
+			Levels: []ThinkingLevel{levelMax}, DefaultLevelValue: "max",
+		},
+		{
+			BaseModel: "kimi-k3.1-pro-highspeed", IDSlug: "kimi-k3.1-pro-highspeed", DisplayName: "Kimi K3.1 Pro Highspeed",
+			MaxOutputTokens: 65536, Provider: "openai", ProviderKey: "kimi",
+			BaseURL: "http://localhost:8317/v1", Kind: KindKimi,
+			Levels: []ThinkingLevel{levelMax}, DefaultLevelValue: "max",
+		},
 		{
 			BaseModel: "kimi-k3", IDSlug: "kimi-k3", DisplayName: "Kimi K3",
 			MaxOutputTokens: 65536, Provider: "openai", ProviderKey: "kimi",
@@ -271,20 +305,14 @@ func Definitions() []ModelDefinition {
 		},
 		{
 			BaseModel: "kimi-k2.6", IDSlug: "kimi-k2.6", DisplayName: "Kimi K2.6",
-			MaxOutputTokens: 262144, Provider: "openai", ProviderKey: "kimi",
+			MaxOutputTokens: 65536, Provider: "openai", ProviderKey: "kimi",
 			BaseURL: "http://localhost:8317/v1", Kind: KindKimi,
 			Levels: []ThinkingLevel{levelHigh}, DefaultLevelValue: "high",
 		},
 
 		// Junie (JetBrains AI) models: ThinkingProxy strips the `junie-` prefix
 		// and forwards to the JetBrains Grazie backend. The prefix keeps these
-		// distinct from the OAuth Claude entries above.
-		{
-			BaseModel: "junie-claude-sonnet-5", IDSlug: "junie-claude-sonnet-5", DisplayName: "Junie Sonnet 5",
-			MaxOutputTokens: 128000, Provider: "anthropic", ProviderKey: "junie",
-			BaseURL: "http://localhost:8317", Kind: KindJunie,
-			Levels: claudeAdvancedLevels(), DefaultLevelValue: "xhigh",
-		},
+		// distinct from the OAuth Claude/Codex entries.
 		{
 			BaseModel: "junie-claude-opus-5-5", IDSlug: "junie-claude-opus-5-5", DisplayName: "Junie Opus 5.5",
 			MaxOutputTokens: 128000, Provider: "anthropic", ProviderKey: "junie",
@@ -292,16 +320,16 @@ func Definitions() []ModelDefinition {
 			Levels: claudeAdvancedLevels(), DefaultLevelValue: "xhigh",
 		},
 		{
-			BaseModel: "junie-claude-fable-5-1", IDSlug: "junie-claude-fable-5-1", DisplayName: "Junie Fable 5.1",
-			MaxOutputTokens: 128000, Provider: "anthropic", ProviderKey: "junie",
-			BaseURL: "http://localhost:8317", Kind: KindJunie,
-			Levels: claudeAdvancedLevels(), DefaultLevelValue: "xhigh",
+			BaseModel: "junie-gpt-6.1-sol", IDSlug: "junie-gpt-6.1-sol", DisplayName: "Junie Sol 6.1",
+			MaxOutputTokens: 128000, MaxContextLimit: 272_000, Provider: "openai", ProviderKey: "junie",
+			BaseURL: "http://localhost:8317/v1", Kind: KindJunie,
+			Levels: gpt6Levels(), DefaultLevelValue: "xhigh",
 		},
 
 		// Grok OAuth (SuperGrok / X Premium+) via the Responses API;
-		// ThinkingProxy attaches the bearer. grok-4.7 goes to api.x.ai. The
-		// fast variant is the same model on faster infrastructure (2x price)
-		// and is served only by cli-chat-proxy. Context window from
+		// ThinkingProxy attaches the bearer. Both go to cli-chat-proxy (Grok
+		// Build billing); api.x.ai would bill as X API. The fast variant is the
+		// same model on faster infrastructure (2x price). Context window from
 		// docs.x.ai: grok-4.7=500k.
 		{
 			BaseModel: "grok-4.7", IDSlug: "grok-4.7", DisplayName: "Grok 4.7",
@@ -317,27 +345,58 @@ func Definitions() []ModelDefinition {
 		},
 	}
 
-	// Muse Spark is only exposed with an enabled, usable key, matching backend
-	// configuration eligibility. Contributor Mode picks exactly one of the two
-	// variants; they are never both applied at once.
+	// Muse Wonder models are only exposed with an enabled, usable key, matching
+	// backend configuration eligibility. Contributor Mode selects the
+	// contributor variant of each Wonder model; the catalog never includes both
+	// variants of the same model at once.
 	if hasUsableMetaAPIKey() {
 		if prefs.MetaContributorMode() {
-			list = append(list, MuseModel("muse-spark-1.3-contributor", "muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor"))
+			list = append(list,
+				MuseModel("muse-wonder-1.0-contributor", "muse-wonder-1.0-contributor", "Muse Wonder 1.0 Contributor"),
+				MuseModel("muse-wonder-full-1.0-contributor", "muse-wonder-full-1.0-contributor", "Muse Wonder Full 1.0 Contributor"),
+			)
 		} else {
-			list = append(list, MuseModel("muse-spark-1.3", "muse-spark-1.3", "Muse Spark 1.3"))
+			list = append(list,
+				MuseModel("muse-wonder-1.0", "muse-wonder-1.0", "Muse Wonder 1.0"),
+				MuseModel("muse-wonder-full-1.0", "muse-wonder-full-1.0", "Muse Wonder Full 1.0"),
+			)
 		}
 	}
 	return list
 }
 
-// SettingsModels returns the Factory entries for every definition whose
-// providerKey passes providerIsEnabled. A nil filter includes everything.
-func SettingsModels(providerIsEnabled func(providerKey string) bool) []map[string]any {
-	var out []map[string]any
+// EnabledDefinitions is the single seam where provider and per-model
+// enablement resolve: a definition is in when its provider passes
+// providerIsEnabled (nil includes every provider) and the model itself is
+// enabled in prefs.
+func EnabledDefinitions(providerIsEnabled func(providerKey string) bool) []ModelDefinition {
+	var out []ModelDefinition
 	for _, d := range Definitions() {
 		if providerIsEnabled != nil && !providerIsEnabled(d.ProviderKey) {
 			continue
 		}
+		if !prefs.IsModelEnabled(d.IDSlug) {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// FindDefinition returns the definition with this ID slug, if one exists.
+func FindDefinition(slug string) (ModelDefinition, bool) {
+	for _, d := range Definitions() {
+		if d.IDSlug == slug {
+			return d, true
+		}
+	}
+	return ModelDefinition{}, false
+}
+
+// SettingsModels returns the Factory entries for the enabled definitions.
+func SettingsModels(providerIsEnabled func(providerKey string) bool) []map[string]any {
+	var out []map[string]any
+	for _, d := range EnabledDefinitions(providerIsEnabled) {
 		out = append(out, d.SettingsEntry())
 	}
 	return out
