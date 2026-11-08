@@ -152,6 +152,44 @@ func TestIsExpiredUsesPastExpiry(t *testing.T) {
 	}
 }
 
+func TestExpiredAccessTokenWithRefreshTokenIsStillUsable(t *testing.T) {
+	setAuthDirHome(t)
+	dir := paths.AuthDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	past := "2026-01-01T00:00:00-08:00"
+	writeAuthFile(t, filepath.Join(dir, "refreshable.json"), map[string]any{
+		"type": "antigravity", "email": "a@b.com", "expired": past, "refresh_token": "1//refresh",
+	})
+	writeAuthFile(t, filepath.Join(dir, "no-refresh.json"), map[string]any{
+		"type": "antigravity", "email": "c@d.com", "expired": past,
+	})
+	writeAuthFile(t, filepath.Join(dir, "empty-refresh.json"), map[string]any{
+		"type": "antigravity", "email": "e@f.com", "expired": past, "refresh_token": "",
+	})
+
+	m := NewManager()
+	m.CheckAuthStatus()
+
+	accounts := m.Accounts(Antigravity)
+	if len(accounts) != 3 {
+		t.Fatalf("accounts = %d", len(accounts))
+	}
+	for _, a := range accounts {
+		if !a.IsAccessExpired() {
+			t.Errorf("%s: access token should read as expired", a.Email)
+		}
+		wantRefresh := a.Email == "a@b.com"
+		if a.CanRefresh != wantRefresh {
+			t.Errorf("%s: CanRefresh = %t", a.Email, a.CanRefresh)
+		}
+		if a.IsExpired() == wantRefresh {
+			t.Errorf("%s: IsExpired = %t", a.Email, a.IsExpired())
+		}
+	}
+}
+
 type fakeMetaStore struct {
 	accounts []Account
 	toggled  string

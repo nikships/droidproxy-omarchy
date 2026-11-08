@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
 	"github.com/nikships/droidproxy-omarchy/internal/paths"
 	"github.com/nikships/droidproxy-omarchy/internal/prefs"
+	"github.com/nikships/droidproxy-omarchy/internal/usage"
 )
 
 // authResultTitle is the dialog title the macOS app used for every
@@ -186,6 +189,16 @@ func (d *Daemon) Call(ctx context.Context, method string, params json.RawMessage
 		}
 		return d.setSetting(p.Key, p.Value)
 
+	case "model.setEnabled":
+		var p struct {
+			Slug    string `json:"slug"`
+			Enabled bool   `json:"enabled"`
+		}
+		if !parseParams(params, &p) || p.Slug == "" {
+			return control.Fail("Invalid parameters.")
+		}
+		return d.setModelEnabled(p.Slug, p.Enabled)
+
 	case "factory.apply":
 		message, err := catalog.ApplyFactoryCustomModels(d.isProviderEnabled)
 		d.invalidateFactory()
@@ -197,6 +210,29 @@ func (d *Daemon) Call(ctx context.Context, method string, params json.RawMessage
 
 	case "usage.refresh":
 		d.refreshUsage()
+		return control.OK("")
+
+	case "usage.redeemReset":
+		var p struct {
+			Provider  string `json:"provider"`
+			AccountID string `json:"accountId"`
+		}
+		if !parseParams(params, &p) || p.Provider == "" || p.AccountID == "" {
+			return control.Fail("Invalid parameters.")
+		}
+		return d.redeemReset(p.Provider, p.AccountID)
+
+	case "usage.copyCurl":
+		var p struct {
+			Provider  string `json:"provider"`
+			AccountID string `json:"accountId"`
+		}
+		if !parseParams(params, &p) || p.Provider == "" || p.AccountID == "" {
+			return control.Fail("Invalid parameters.")
+		}
+		if err := desktop.CopyToClipboard(usage.CurlCommand(p.Provider, p.AccountID)); err != nil {
+			return control.Fail("Could not copy: " + err.Error())
+		}
 		return control.OK("")
 
 	case "update.check":
@@ -232,12 +268,11 @@ func ensureLogsDir() error {
 }
 
 func (d *Daemon) copyServerURL() control.CallResult {
-	host := prefs.BindAddress()
-	displayHost := host
-	if host == "0.0.0.0" {
+	displayHost := prefs.BindAddress()
+	if displayHost == "0.0.0.0" {
 		displayHost = "localhost"
 	}
-	url := fmt.Sprintf("http://%s:%d", displayHost, ProxyPort)
+	url := "http://" + net.JoinHostPort(displayHost, strconv.Itoa(ProxyPort))
 	if err := desktop.CopyToClipboard(url); err != nil {
 		return control.Fail("Could not copy: " + err.Error())
 	}
@@ -260,6 +295,47 @@ func serviceTypeFromParam(provider string) (auth.ServiceType, control.CallResult
 	return st, control.OK("")
 }
 
+// setModelEnabled records desired state only. The Factory config is not
+// touched until factory.apply reconciles it; the panel applies right after
+// every toggle, so turning a model off also removes it from Factory.
+func (d *Daemon) setModelEnabled(slug string, enabled bool) control.CallResult {
+	def, ok := catalog.FindDefinition(slug)
+	if !ok {
+		return control.Fail("Unknown model: " + slug)
+	}
+	if err := prefs.SetModelEnabled(slug, enabled); err != nil {
+		return control.Fail("Failed to save model setting: " + err.Error())
+	}
+	d.invalidateFactory()
+	d.notifyStateChanged()
+	state := "disabled"
+	if enabled {
+		state = "enabled"
+	}
+	return control.OK(def.DisplayName + " " + state + ". Apply Factory models to update the Factory config.")
+}
+
+// redeemReset spends one banked usage reset for the account. The panel
+// confirms first; this spends a scarce credit.
+func (d *Daemon) redeemReset(provider, accountID string) control.CallResult {
+	st, res := serviceTypeFromParam(provider)
+	if !res.OK {
+		return res
+	}
+	for _, account := range d.usageAccounts(st) {
+		if account.ID != accountID {
+			continue
+		}
+		message, ok := d.usage.RedeemReset(account)
+		if ok {
+			d.refreshUsage()
+			return control.OK(message)
+		}
+		return control.Fail(message)
+	}
+	return control.Fail("Unknown account.")
+}
+
 func (d *Daemon) setProviderEnabled(provider string, enabled bool) control.CallResult {
 	st, res := serviceTypeFromParam(provider)
 	if !res.OK {
@@ -276,6 +352,7 @@ func (d *Daemon) setProviderEnabled(provider string, enabled bool) control.CallR
 		}
 	}
 	d.invalidateFactory()
+	d.refreshUsageIfAccountsChanged()
 	d.notifyStateChanged()
 	return control.OK("")
 }
@@ -319,9 +396,26 @@ func (d *Daemon) cancelProviderAuth(provider string) control.CallResult {
 		}
 	case auth.Meta:
 		d.cancelMetaAuth()
+	default:
+		// Bundled browser logins: terminate the helper the backend manager
+		// still owns, which releases its OAuth callback port.
+		if command, ok := bundledLoginCommands()[st]; ok && d.backend != nil {
+			if !d.backend.CancelAuthCommand(command) && !d.loginInFlightFor(st) {
+				return control.Fail("No " + st.DisplayName() + " sign-in is in progress.")
+			}
+		}
+		d.mu.Lock()
+		delete(d.loginInFlight, st)
+		d.mu.Unlock()
 	}
 	d.notifyStateChanged()
-	return control.OK("")
+	return control.OK("Sign-in cancelled.")
+}
+
+func (d *Daemon) loginInFlightFor(st auth.ServiceType) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.loginInFlight[st]
 }
 
 func (d *Daemon) cancelMetaAuth() {
@@ -352,6 +446,9 @@ func (d *Daemon) runBundledLogin(ctx context.Context, st auth.ServiceType) contr
 		return control.Fail("Unknown provider: " + string(st))
 	}
 
+	if d.backend != nil && d.backend.AuthRunning(command) {
+		return control.Fail("A " + st.DisplayName() + " login is already in progress. Cancel it before starting another.")
+	}
 	d.mu.Lock()
 	if d.loginInFlight[st] {
 		d.mu.Unlock()
@@ -518,7 +615,7 @@ func (d *Daemon) startMetaLogin() {
 			d.mu.Unlock()
 			if err == nil {
 				d.postMessageEvent(authResultTitle,
-					"Meta Muse connected.\n\nMuse Spark 1.3 and Muse Spark 1.3 Contributor are now available. Re-apply Factory custom models to pick them up.",
+					"Meta Muse connected.\n\nMuse Wonder 1.0 and Muse Wonder 1.0 Contributor are now available. Re-apply Factory custom models to pick them up.",
 					control.LevelInfo)
 			} else {
 				d.postMessageEvent(authResultTitle, "Meta Muse authentication failed: "+err.Error(), control.LevelError)
@@ -681,32 +778,16 @@ func (d *Daemon) setSetting(key string, value json.RawMessage) control.CallResul
 		}
 		d.invalidateFactory()
 
-	case "oledTheme":
-		if err := setBoolPref(prefs.KeyOLEDTheme, value); err != nil {
-			return fail(err)
-		}
-
-	case "backgroundOpacity":
-		var opacity float64
-		if len(value) == 0 || json.Unmarshal(value, &opacity) != nil {
-			return control.Fail("Invalid value.")
-		}
-		if opacity < 0.10 {
-			opacity = 0.10
-		}
-		if opacity > 1.0 {
-			opacity = 1.0
-		}
-		if err := prefs.Shared().Set(prefs.KeyBackgroundOpacity, opacity); err != nil {
-			return fail(err)
-		}
-
 	case "gpt6AstraFastMode":
 		if err := setBoolPref(prefs.KeyGPT6AstraFastMode, value); err != nil {
 			return fail(err)
 		}
-	case "gpt6SolFastMode":
-		if err := setBoolPref(prefs.KeyGPT6SolFastMode, value); err != nil {
+	case "gpt61SolFastMode":
+		if err := setBoolPref(prefs.KeyGPT61SolFastMode, value); err != nil {
+			return fail(err)
+		}
+	case "gpt61TerraFastMode":
+		if err := setBoolPref(prefs.KeyGPT61TerraFastMode, value); err != nil {
 			return fail(err)
 		}
 	case "gpt6LunaFastMode":
@@ -719,6 +800,19 @@ func (d *Daemon) setSetting(key string, value json.RawMessage) control.CallResul
 			return fail(err)
 		}
 		d.invalidateFactory()
+
+	case "windowPrimerEnabled.claude", "windowPrimerEnabled.codex", "windowPrimerEnabled.meta":
+		if err := setBoolPref(key, value); err != nil {
+			return fail(err)
+		}
+	case "windowPrimerMinutes.claude", "windowPrimerMinutes.codex", "windowPrimerMinutes.meta":
+		var minutes int
+		if len(value) == 0 || json.Unmarshal(value, &minutes) != nil || minutes < 0 || minutes >= 24*60 {
+			return control.Fail("Invalid value.")
+		}
+		if err := prefs.Shared().Set(key, minutes); err != nil {
+			return fail(err)
+		}
 
 	case "autoCheckUpdates":
 		if err := setBoolPref(prefs.KeyAutoCheckUpdates, value); err != nil {

@@ -40,14 +40,16 @@ func TestPreservesNativeMuseUserAgentWithoutDuplicates(t *testing.T) {
 	}
 }
 
-func TestRecognizesMuseSparkModels(t *testing.T) {
+func TestRecognizesMuseWonderModels(t *testing.T) {
 	cases := map[string]bool{
-		"muse-spark-1.3":             true,
-		"muse-spark-1.3-contributor": true,
-		"muse-spark-1.2":             false,
-		"gpt-6-sol":                  false,
-		"grok-4.6":                   false,
-		"":                           false,
+		"muse-wonder-1.0":                  true,
+		"muse-wonder-1.0-contributor":      true,
+		"muse-wonder-full-1.0":             true,
+		"muse-wonder-full-1.0-contributor": true,
+		"muse-spark-1.3":                   false,
+		"gpt-6.1-sol":                      false,
+		"grok-4.6":                         false,
+		"":                                 false,
 	}
 	for model, want := range cases {
 		if IsMetaModel(model) != want {
@@ -72,13 +74,13 @@ func TestDetectsResponsesPathsIncludingCompact(t *testing.T) {
 }
 
 func TestTLSForwardsOnlyMuseResponses(t *testing.T) {
-	if !ShouldTLSForward("muse-spark-1.3-contributor", "/v1/responses") {
+	if !ShouldTLSForward("muse-wonder-1.0-contributor", "/v1/responses") {
 		t.Error("Muse responses must be TLS-forwarded")
 	}
-	if !ShouldTLSForward("muse-spark-1.3", "/api/v1/responses") {
+	if !ShouldTLSForward("muse-wonder-full-1.0", "/api/v1/responses") {
 		t.Error("Muse responses must be TLS-forwarded")
 	}
-	if ShouldTLSForward("muse-spark-1.3-contributor", "/v1/chat/completions") {
+	if ShouldTLSForward("muse-wonder-full-1.0-contributor", "/v1/chat/completions") {
 		t.Error("completions must go through the compatibility block")
 	}
 	if ShouldTLSForward("gpt-5.4", "/v1/responses") {

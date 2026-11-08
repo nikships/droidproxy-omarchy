@@ -81,7 +81,7 @@ usage: droidproxy <command> [args]
   ctl call <method> [json]  run one action, e.g. droidproxy ctl call server.toggle
   status                    human-readable summary of the daemon state
   start | stop | restart    control the droidproxy systemd user service
-  open                      open the DroidProxy settings panel in the shell
+  open                      open the bar panel
   login <provider>          start a provider sign-in flow
   update [check|install]    check for updates, or install the available one
   rollback                  switch back to the previous version
@@ -271,7 +271,10 @@ func cmdOpen(args []string) error {
 			return fmt.Errorf("could not start the service: %w", err)
 		}
 	}
-	return desktop.DroidProxyIPC("openSettings")
+	if _, err := desktop.Default.LookPath("omarchy-shell"); err != nil {
+		return fmt.Errorf("omarchy-shell is not available; the bar panel needs the Omarchy shell: %w", err)
+	}
+	return desktop.ShellIPC(buildinfo.PluginID, "open")
 }
 
 func cmdLogin(args []string) error {

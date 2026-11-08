@@ -33,10 +33,10 @@ var providerOrder = []providerInfo{
 	{auth.Claude, "icon-claude.png", "#D97757", control.KindStandard, ""},
 	{auth.Codex, "icon-codex.png", "#74AA9C", control.KindStandard, ""},
 	{auth.Meta, "icon-meta.svg", "#0866FF", control.KindMeta, "Add Meta Muse accounts for automatic account failover."},
-	{auth.Antigravity, "icon-gemini.png", "#4285F4", control.KindStandard, "Uses your Antigravity subscription for the Antigravity-backed Gemini, Claude, and GPT-OSS models."},
-	{auth.Kimi, "icon-kimi.svg", "#00BF91", control.KindStandard, ""},
-	{auth.Junie, "icon-junie.svg", "#48E054", control.KindJunie, "Enter your JetBrains Junie API key to use your JetBrains AI subscription for Junie Sonnet 5, Opus 5.5, and Fable 5.1."},
-	{auth.Grok, "icon-grok.svg", "#1D9BF0", control.KindGrok, "Log in with SuperGrok / X Premium+ to use Grok 4.7 and Grok 4.7 Fast (no xAI API key)."},
+	{auth.Antigravity, "icon-gemini.png", "#4285F4", control.KindStandard, "Uses your Antigravity subscription for the Antigravity-backed Gemini and Claude models."},
+	{auth.Kimi, "icon-kimi.svg", "#FFFFFF", control.KindStandard, ""},
+	{auth.Junie, "icon-junie.svg", "#48E054", control.KindJunie, "Enter your JetBrains Junie API key to use your JetBrains AI subscription for Junie Opus 5.5 and Sol 6.1."},
+	{auth.Grok, "icon-grok.svg", "#FFFFFF", control.KindGrok, "Log in with SuperGrok / X Premium+ to use Grok 4.7 and Grok 4.7 Fast (no xAI API key)."},
 }
 
 // State assembles the full control API snapshot. It runs on HTTP handler
@@ -68,19 +68,25 @@ func (d *Daemon) State() control.State {
 
 	metaState := d.metaAuth.State()
 
+	installedIDs := d.factoryInstalledIDs()
 	providers := make([]control.ProviderState, 0, len(providerOrder))
 	for _, p := range providerOrder {
 		st := control.ProviderState{
-			ID:      string(p.serviceType),
-			Name:    p.serviceType.DisplayName(),
-			Icon:    p.icon,
-			Color:   p.color,
-			Kind:    p.kind,
-			Enabled: prefs.IsProviderEnabled(string(p.serviceType)),
-			Help:    p.help,
+			ID:            string(p.serviceType),
+			Name:          p.serviceType.DisplayName(),
+			Icon:          p.icon,
+			Color:         p.color,
+			Kind:          p.kind,
+			Enabled:       prefs.IsProviderEnabled(string(p.serviceType)),
+			PrimerApplies: d.primerApplies(p.serviceType),
+			Help:          p.help,
+		}
+		bundledRunning := false
+		if command, ok := bundledLoginCommands()[p.serviceType]; ok && d.backend != nil {
+			bundledRunning = d.backend.AuthRunning(command)
 		}
 		switch {
-		case loginInFlight[p.serviceType]:
+		case loginInFlight[p.serviceType] || bundledRunning:
 			st.Authenticating = true
 		case p.serviceType == auth.Grok && grokSession != nil:
 			st.Authenticating = true
@@ -96,6 +102,17 @@ func (d *Daemon) State() control.State {
 				Disabled:    a.Disabled,
 			})
 		}
+		for _, def := range catalog.Definitions() {
+			if def.ProviderKey != string(p.serviceType) {
+				continue
+			}
+			st.Models = append(st.Models, control.ModelState{
+				Slug:        def.IDSlug,
+				DisplayName: def.DisplayName,
+				Enabled:     prefs.IsModelEnabled(def.IDSlug),
+				Installed:   installedIDs[def.SimpleID()],
+			})
+		}
 		providers = append(providers, st)
 	}
 
@@ -105,23 +122,35 @@ func (d *Daemon) State() control.State {
 		windows := make([]control.UsageWindow, 0, len(a.Windows))
 		for _, w := range a.Windows {
 			cw := control.UsageWindow{
-				Title:        w.Title,
-				HasRemaining: w.HasRemaining,
-				ResetText:    w.ResetText,
-			}
-			if w.RemainingPercent != nil {
-				cw.RemainingPercent = *w.RemainingPercent
+				Title:            w.Title,
+				RemainingPercent: w.RemainingPercent,
+				HasRemaining:     w.HasRemaining,
+				ResetText:        w.ResetText,
 			}
 			windows = append(windows, cw)
 		}
-		usageRows = append(usageRows, control.UsageAccount{
+		updatedAt := ""
+		if a.UpdatedAt != nil {
+			updatedAt = a.UpdatedAt.Format(time.RFC3339)
+		}
+		row := control.UsageAccount{
+			ID:           a.ID,
 			Provider:     a.Provider,
 			ProviderName: a.ProviderName,
 			Email:        a.Email,
 			Loading:      a.Loading,
 			Error:        a.Error,
 			Windows:      windows,
-		})
+			UpdatedAt:    updatedAt,
+		}
+		if a.ResetCredits != nil && a.ResetCredits.AvailableCount > 0 {
+			credits := &control.UsageResetCredits{AvailableCount: a.ResetCredits.AvailableCount}
+			if a.ResetCredits.NextExpiresAt != nil {
+				credits.NextExpiresAt = a.ResetCredits.NextExpiresAt.Format(time.RFC3339)
+			}
+			row.ResetCredits = credits
+		}
+		usageRows = append(usageRows, row)
 	}
 
 	return control.State{
@@ -151,12 +180,17 @@ func (d *Daemon) State() control.State {
 			Beta:                      prefs.BetaFlag(),
 			VerboseLogging:            prefs.VerboseLogging(),
 			SequentialAccountFailover: prefs.SequentialAccountFailover(),
-			OLEDTheme:                 prefs.OLEDTheme(),
-			BackgroundOpacity:         prefs.BackgroundOpacity(),
 			GPT6AstraFastMode:         prefs.GPT6AstraFastMode(),
-			GPT6SolFastMode:           prefs.GPT6SolFastMode(),
+			GPT61SolFastMode:          prefs.GPT61SolFastMode(),
+			GPT61TerraFastMode:        prefs.GPT61TerraFastMode(),
 			GPT6LunaFastMode:          prefs.GPT6LunaFastMode(),
 			MetaContributorMode:       prefs.MetaContributorMode(),
+			WindowPrimerEnabledClaude: prefs.WindowPrimerEnabled("claude"),
+			WindowPrimerMinutesClaude: prefs.WindowPrimerMinutes("claude"),
+			WindowPrimerEnabledCodex:  prefs.WindowPrimerEnabled("codex"),
+			WindowPrimerMinutesCodex:  prefs.WindowPrimerMinutes("codex"),
+			WindowPrimerEnabledMeta:   prefs.WindowPrimerEnabled("meta"),
+			WindowPrimerMinutesMeta:   prefs.WindowPrimerMinutes("meta"),
 			AutoCheckUpdates:          prefs.AutoCheckUpdates(),
 			AutoInstallUpdates:        prefs.AutoInstallUpdates(),
 		},
@@ -195,10 +229,10 @@ func (d *Daemon) isProviderEnabled(st auth.ServiceType) bool {
 	return prefs.IsProviderEnabled(string(st))
 }
 
-// usageVisible mirrors SettingsView: the quota section shows when Codex or
-// Claude is enabled or has any connected account.
+// usageVisible mirrors SettingsView: the quota section shows when any
+// usage-tracked provider is enabled or has any connected account.
 func (d *Daemon) usageVisible() bool {
-	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude} {
+	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta} {
 		if prefs.IsProviderEnabled(string(st)) || d.authMgr.HasAccounts(st) {
 			return true
 		}
@@ -217,10 +251,20 @@ func (d *Daemon) factoryModelsInstalled() bool {
 		return installed
 	}
 	v := catalog.CheckFactoryModelsInstalled(d.isProviderEnabled)
+	ids := catalog.InstalledFactoryModelIDs()
 	d.mu.Lock()
-	d.factoryInstalled, d.factoryDirty = v, false
+	d.factoryInstalled, d.factoryIDs, d.factoryDirty = v, ids, false
 	d.mu.Unlock()
 	return v
+}
+
+// factoryInstalledIDs returns the cached set of DroidProxy model ids written
+// to the Factory config, refreshing it with the installed check.
+func (d *Daemon) factoryInstalledIDs() map[string]bool {
+	d.factoryModelsInstalled()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.factoryIDs
 }
 
 func (d *Daemon) invalidateFactory() {

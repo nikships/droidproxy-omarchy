@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,6 +49,23 @@ func allEnabled(_ auth.ServiceType) bool { return true }
 func home(t *testing.T) string {
 	t.Helper()
 	return os.Getenv("HOME")
+}
+
+// TestMain isolates the whole package from the developer's real HOME:
+// SettingsModels reads prefs (per-model toggles), so without this the
+// suite passes or fails with the state of the machine it runs on.
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "droidproxy-catalog-test-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("HOME", home)
+	os.Setenv("XDG_CONFIG_HOME", "")
+	os.Setenv("XDG_DATA_HOME", "")
+	os.Setenv("XDG_STATE_HOME", "")
+	code := m.Run()
+	os.RemoveAll(home)
+	os.Exit(code)
 }
 
 // isolateHome redirects paths and prefs to a temp dir for the test.
@@ -105,6 +123,55 @@ func TestApplyMergesModelsAndKeepsOtherSettings(t *testing.T) {
 	}
 	if modelIndexFor(t, models, "custom:droidproxy:fable-5-1") != 1 {
 		t.Error("DroidProxy entries must start at index = kept count")
+	}
+}
+
+func TestApplySkipsAndRemovesDisabledModelsOnly(t *testing.T) {
+	isolateHome(t)
+	victim := Definitions()[0]
+	// A non-DroidProxy entry that merely carries the DroidProxy display name
+	// must survive: ownership is the custom:droidproxy: id prefix.
+	writeFactoryFile(t, `{"customModels":[{"id":"user-model","model":"m","displayName":"DroidProxy: mine"},{"id":"`+victim.SimpleID()+`","model":"stale"}]}`)
+	if err := prefs.SetModelEnabled(victim.IDSlug, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ApplyFactoryCustomModels(allEnabled); err != nil {
+		t.Fatalf("apply failed: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, m := range modelIDsFromSettings(t, readFactoryFile(t)) {
+		if id, ok := m["id"].(string); ok {
+			ids[id] = true
+		}
+	}
+	if ids[victim.SimpleID()] {
+		t.Errorf("disabled model %s was written to Factory", victim.SimpleID())
+	}
+	if !ids["user-model"] {
+		t.Error("non-DroidProxy model was removed")
+	}
+	if len(ids) != len(Definitions()) {
+		t.Errorf("expected %d entries (all but the disabled one, plus user model), got %d", len(Definitions()), len(ids))
+	}
+	if !CheckFactoryModelsInstalled(allEnabled) {
+		t.Error("installed check should pass with the disabled model absent")
+	}
+
+	if err := prefs.SetModelEnabled(victim.IDSlug, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyFactoryCustomModels(allEnabled); err != nil {
+		t.Fatalf("re-apply failed: %v", err)
+	}
+	found := false
+	for _, m := range modelIDsFromSettings(t, readFactoryFile(t)) {
+		if m["id"] == victim.SimpleID() {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("re-enabled model was not restored to Factory")
 	}
 }
 
@@ -277,5 +344,40 @@ func TestApplyFailureMessage(t *testing.T) {
 	}
 	if !strings.HasPrefix(msg, "Failed to update Factory settings: ") {
 		t.Errorf("unexpected failure message: %q", msg)
+	}
+}
+
+// Overlapping applies (rapid panel toggles each fire one) must leave
+// one coherent settings file: valid JSON, each DroidProxy model once.
+// Run with -race.
+func TestApplyFactoryCustomModelsConcurrent(t *testing.T) {
+	isolateHome(t)
+	writeFactoryFile(t, `{"customModels":[{"id":"user-model","model":"m"}]}`)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := ApplyFactoryCustomModels(allEnabled); err != nil {
+				t.Errorf("concurrent apply: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	seen := map[string]int{}
+	for _, m := range modelIDsFromSettings(t, readFactoryFile(t)) {
+		if id, ok := m["id"].(string); ok {
+			seen[id]++
+		}
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("model %s written %d times", id, n)
+		}
+	}
+	if seen["user-model"] != 1 {
+		t.Error("user model lost")
 	}
 }
