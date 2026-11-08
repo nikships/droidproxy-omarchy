@@ -5,16 +5,16 @@
   "version": "1.0.0",
   "author": "nikships",
   "license": "MIT",
-  "description": "DroidProxy bar icon: shows server status, opens the settings web app on click. Talks to the droidproxy daemon over its ctl CLI.",
+  "description": "DroidProxy bar panel: server, quota rings, accounts, and the settings the macOS menu bar shows. Talks to the droidproxy daemon over its ctl CLI.",
   "kinds": ["service", "bar-widget"],
   "keepLoaded": true,
   "entryPoints": {
     "service": "Service.qml",
-    "barWidget": "BarWidget.qml"
+    "barWidget": "Panel.qml"
   },
   "barWidget": {
     "displayName": "DroidProxy",
-    "description": "DroidProxy server status icon. Click to open the settings web app.",
+    "description": "Server status, quota, and provider accounts in a bar panel.",
     "category": "Network",
     "aliases": ["droidproxy", "proxy"],
     "allowMultiple": false,

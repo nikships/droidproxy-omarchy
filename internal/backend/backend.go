@@ -102,6 +102,12 @@ type Manager struct {
 	done    chan struct{} // closed once the backend process has fully exited
 	running bool
 
+	// Login helpers outlive the ~1s liveness result, so the manager keeps
+	// their handles until they exit. That keeps "authenticating" truthful
+	// and lets a cancel reach the helper holding the OAuth callback port.
+	authMu    sync.Mutex
+	authProcs map[AuthCommand]*exec.Cmd
+
 	logMu sync.Mutex
 	logs  ringBuffer
 }
@@ -116,6 +122,7 @@ func newManager(binaryPath, configTemplate string) *Manager {
 	return &Manager{
 		binaryPath:     binaryPath,
 		configTemplate: configTemplate,
+		authProcs:      map[AuthCommand]*exec.Cmd{},
 		metaAccounts:   func() []meta.Account { return meta.Shared().Accounts() },
 		metaEnabled:    func() bool { return prefs.IsProviderEnabled(string(auth.Meta)) },
 		now:            time.Now,
@@ -448,6 +455,7 @@ func (m *Manager) RunAuthCommandAsync(command AuthCommand, completion func(bool,
 	logx.Logf("[Auth] Starting process: %s with args: %s", m.binaryPath, strings.Join(cmd.Args, " "))
 	m.addLog(fmt.Sprintf("Authentication process started (PID: %d) - browser should open shortly", cmd.Process.Pid))
 	logx.Logf("[Auth] Process started with PID: %d", cmd.Process.Pid)
+	m.trackAuth(command, cmd)
 
 	var out, errOut syncBuffer
 	var copyWG sync.WaitGroup
@@ -460,6 +468,7 @@ func (m *Manager) RunAuthCommandAsync(command AuthCommand, completion func(bool,
 	done := make(chan struct{})
 	go func() {
 		err := cmd.Wait()
+		m.untrackAuth(command, cmd)
 		code := int32(0)
 		if err != nil {
 			var exitErr *exec.ExitError
@@ -473,15 +482,16 @@ func (m *Manager) RunAuthCommandAsync(command AuthCommand, completion func(bool,
 		exited.Store(true)
 		close(done)
 		logx.Logf("[Auth] Process terminated with exit code: %d", code)
-		// Notify watchers when auth completes successfully so the UI picks up
-		// the freshly written credential file.
-		if code == 0 {
-			go func() {
+		// Notify watchers on every termination: success brings a freshly
+		// written credential file, and any exit clears AuthRunning, which
+		// State surfaces as the provider's Authenticating flag.
+		go func() {
+			if code == 0 {
 				time.Sleep(authMigrationDelay)
 				claude.MigrateCanonicalFiles(paths.AuthDir())
-				events.Publish(events.AuthDirectoryChanged)
-			}()
-		}
+			}
+			events.Publish(events.AuthDirectoryChanged)
+		}()
 	}()
 
 	// For Codex login, avoid blocking on the manual callback prompt after ~12s.
@@ -533,6 +543,45 @@ func (m *Manager) RunAuthCommandAsync(command AuthCommand, completion func(bool,
 			finish(true, browserOpenedMessage)
 		}
 	}()
+}
+
+func (m *Manager) trackAuth(command AuthCommand, cmd *exec.Cmd) {
+	m.authMu.Lock()
+	m.authProcs[command] = cmd
+	m.authMu.Unlock()
+}
+
+func (m *Manager) untrackAuth(command AuthCommand, cmd *exec.Cmd) {
+	m.authMu.Lock()
+	if m.authProcs[command] == cmd {
+		delete(m.authProcs, command)
+	}
+	m.authMu.Unlock()
+}
+
+// AuthRunning reports whether a login helper for the flow is still running
+// (past the short liveness result RunAuthCommand returns).
+func (m *Manager) AuthRunning(command AuthCommand) bool {
+	m.authMu.Lock()
+	defer m.authMu.Unlock()
+	return m.authProcs[command] != nil
+}
+
+// CancelAuthCommand terminates the running login helper for the flow, which
+// releases its OAuth callback port. It reports whether a helper was signaled.
+func (m *Manager) CancelAuthCommand(command AuthCommand) bool {
+	m.authMu.Lock()
+	cmd := m.authProcs[command]
+	m.authMu.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		return false
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		logx.Logf("[Auth] Cancel %s: signal PID %d: %v", command, cmd.Process.Pid, err)
+		return false
+	}
+	logx.Logf("[Auth] Cancelled %s login (PID: %d)", command, cmd.Process.Pid)
+	return true
 }
 
 // syncBuffer is a bytes.Buffer guarded for one writer plus concurrent readers.

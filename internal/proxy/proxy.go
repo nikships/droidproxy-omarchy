@@ -52,6 +52,9 @@ type Proxy struct {
 	// MetaUsageRecorder records a sniffed Meta usage snapshot. Defaults to
 	// the shared usage store; tests inject a stub.
 	MetaUsageRecorder func(accountID string, snapshot meta.UsageSnapshot)
+	// UsageEndpoint answers GET /droidproxy/usage locally; ok is false for
+	// every other path.
+	UsageEndpoint func(requestPath string) (status int, body []byte, ok bool)
 
 	mu       sync.Mutex
 	listener net.Listener

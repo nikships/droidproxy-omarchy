@@ -206,8 +206,10 @@ func TestConfigurationIncludesOnlyEnabledUnexpiredKeysAndEscapesYAML(t *testing.
 	if !strings.Contains(config, `quote\"\\\nkey`) {
 		t.Errorf("YAML escaping missing:\n%s", config)
 	}
-	if !strings.Contains(config, "muse-spark-1.3-contributor") {
-		t.Error("model list missing")
+	for _, model := range []string{"muse-wonder-1.0-contributor", "muse-wonder-full-1.0", "muse-wonder-full-1.0-contributor"} {
+		if !strings.Contains(config, model) {
+			t.Errorf("model list missing %s", model)
+		}
 	}
 	alice.Disabled = true
 	bob.Credentials.APIKeyExpiresAt = secondsFromTime(time.Unix(1, 0))

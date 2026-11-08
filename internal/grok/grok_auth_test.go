@@ -286,22 +286,48 @@ func TestAPIHostIsPublicXAI(t *testing.T) {
 	}
 }
 
-func TestFastModelRoutesToBuildProxy(t *testing.T) {
-	if UpstreamHost("grok-4.7") != "api.x.ai" || UpstreamHost("") != "api.x.ai" {
-		t.Error("grok-4.7 must stay on api.x.ai")
+func TestChatModelsRouteToBuildProxy(t *testing.T) {
+	for _, model := range []string{"grok-4.7", "", "grok-4.7-build-fast"} {
+		if got := UpstreamHost(model); got != "cli-chat-proxy.grok.com" {
+			t.Errorf("UpstreamHost(%q) = %s", model, got)
+		}
 	}
-	if UpstreamHost("grok-4.7-build-fast") != "cli-chat-proxy.grok.com" {
-		t.Error("fast model must route to the Build proxy")
+	assertHeaders(t, UpstreamAuthHeaders("grok-4.7"),
+		[]string{"X-XAI-Token-Auth", "x-grok-model-override", "x-grok-client-version", "x-grok-client-identifier"},
+		[]string{"xai-grok-cli", "grok-4.7", "1.0.40", "grok-shell"})
+	assertHeaders(t, UpstreamAuthHeaders("grok-4.7-build-fast"),
+		[]string{"X-XAI-Token-Auth", "x-grok-model-override", "x-grok-client-version", "x-grok-client-identifier"},
+		[]string{"xai-grok-cli", "grok-4.7-build-fast", "1.0.40", "grok-shell"})
+	assertHeaders(t, UpstreamAuthHeaders(""),
+		[]string{"X-XAI-Token-Auth", "x-grok-client-version", "x-grok-client-identifier"},
+		[]string{"xai-grok-cli", "1.0.40", "grok-shell"})
+}
+
+func TestModelOverrideOmittedWhenModelContainsLineBreaks(t *testing.T) {
+	for _, h := range UpstreamAuthHeaders("grok-4.7\r\nX-Injected: 1") {
+		if h[0] == "x-grok-model-override" || strings.Contains(h[0]+h[1], "Injected") {
+			t.Errorf("unexpected header %v", h)
+		}
 	}
-	if headers := UpstreamAuthHeaders("grok-4.7"); len(headers) != 0 {
+}
+
+func TestImagineModelsStayOnPublicAPI(t *testing.T) {
+	if got := UpstreamHost("grok-imagine-image-2.0"); got != "api.x.ai" {
+		t.Errorf("UpstreamHost = %s", got)
+	}
+	if headers := UpstreamAuthHeaders("grok-imagine-image-2.0"); len(headers) != 0 {
 		t.Errorf("api.x.ai must need no extra headers, got %v", headers)
 	}
-	wantNames := []string{"X-XAI-Token-Auth", "x-grok-model-override", "x-grok-client-version", "x-grok-client-identifier"}
-	wantValues := []string{"xai-grok-cli", "grok-4.7-build-fast", "1.0.40", "grok-shell"}
-	headers := UpstreamAuthHeaders("grok-4.7-build-fast")
+}
+
+func assertHeaders(t *testing.T, headers [][2]string, names, values []string) {
+	t.Helper()
+	if len(headers) != len(names) {
+		t.Fatalf("headers = %v, want names %v", headers, names)
+	}
 	for i, h := range headers {
-		if h[0] != wantNames[i] || h[1] != wantValues[i] {
-			t.Errorf("header %d = %v, want %s: %s", i, h, wantNames[i], wantValues[i])
+		if h[0] != names[i] || h[1] != values[i] {
+			t.Errorf("header %d = %v, want %s: %s", i, h, names[i], values[i])
 		}
 	}
 }

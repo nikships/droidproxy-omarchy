@@ -44,21 +44,26 @@ type ServerState struct {
 }
 
 type Settings struct {
-	LaunchAtLogin             bool    `json:"launchAtLogin"`
-	AllowRemote               bool    `json:"allowRemote"`
-	SecretKey                 string  `json:"secretKey"`
-	BindAddress               string  `json:"bindAddress"`
-	Beta                      bool    `json:"beta"`
-	VerboseLogging            bool    `json:"verboseLogging"`
-	SequentialAccountFailover bool    `json:"sequentialAccountFailover"`
-	OLEDTheme                 bool    `json:"oledTheme"`
-	BackgroundOpacity         float64 `json:"backgroundOpacity"`
-	GPT6AstraFastMode         bool    `json:"gpt6AstraFastMode"`
-	GPT6SolFastMode           bool    `json:"gpt6SolFastMode"`
-	GPT6LunaFastMode          bool    `json:"gpt6LunaFastMode"`
-	MetaContributorMode       bool    `json:"metaContributorMode"`
-	AutoCheckUpdates          bool    `json:"autoCheckUpdates"`
-	AutoInstallUpdates        bool    `json:"autoInstallUpdates"`
+	LaunchAtLogin             bool   `json:"launchAtLogin"`
+	AllowRemote               bool   `json:"allowRemote"`
+	SecretKey                 string `json:"secretKey"`
+	BindAddress               string `json:"bindAddress"`
+	Beta                      bool   `json:"beta"`
+	VerboseLogging            bool   `json:"verboseLogging"`
+	SequentialAccountFailover bool   `json:"sequentialAccountFailover"`
+	GPT6AstraFastMode         bool   `json:"gpt6AstraFastMode"`
+	GPT61SolFastMode          bool   `json:"gpt61SolFastMode"`
+	GPT61TerraFastMode        bool   `json:"gpt61TerraFastMode"`
+	GPT6LunaFastMode          bool   `json:"gpt6LunaFastMode"`
+	MetaContributorMode       bool   `json:"metaContributorMode"`
+	WindowPrimerEnabledClaude bool   `json:"windowPrimerEnabled.claude"`
+	WindowPrimerMinutesClaude int    `json:"windowPrimerMinutes.claude"`
+	WindowPrimerEnabledCodex  bool   `json:"windowPrimerEnabled.codex"`
+	WindowPrimerMinutesCodex  int    `json:"windowPrimerMinutes.codex"`
+	WindowPrimerEnabledMeta   bool   `json:"windowPrimerEnabled.meta"`
+	WindowPrimerMinutesMeta   int    `json:"windowPrimerMinutes.meta"`
+	AutoCheckUpdates          bool   `json:"autoCheckUpdates"`
+	AutoInstallUpdates        bool   `json:"autoInstallUpdates"`
 }
 
 type PathsInfo struct {
@@ -82,15 +87,28 @@ const (
 )
 
 type ProviderState struct {
-	ID             string         `json:"id"`
-	Name           string         `json:"name"`
-	Icon           string         `json:"icon"`
-	Color          string         `json:"color"`
-	Kind           string         `json:"kind"`
-	Enabled        bool           `json:"enabled"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Icon    string `json:"icon"`
+	Color   string `json:"color"`
+	Kind    string `json:"kind"`
+	Enabled bool   `json:"enabled"`
+	// PrimerApplies is false only when every account's usage payload states
+	// the plan has no short (5-hour) window, so Auto-start daily is moot.
+	PrimerApplies  bool           `json:"primerApplies"`
 	Authenticating bool           `json:"authenticating"`
 	Help           string         `json:"help"`
 	Accounts       []AccountState `json:"accounts"`
+	Models         []ModelState   `json:"models"`
+}
+
+// ModelState is one catalog model row: desired state (Enabled) and whether
+// its DroidProxy entry is currently written to the Factory config.
+type ModelState struct {
+	Slug        string `json:"slug"`
+	DisplayName string `json:"displayName"`
+	Enabled     bool   `json:"enabled"`
+	Installed   bool   `json:"installed"`
 }
 
 type AccountState struct {
@@ -148,6 +166,8 @@ type UsageState struct {
 }
 
 type UsageAccount struct {
+	// ID is the account id (auth file name, or Meta account id).
+	ID           string        `json:"id"`
 	Provider     string        `json:"provider"`
 	ProviderName string        `json:"providerName"`
 	Email        string        `json:"email"`
@@ -157,13 +177,25 @@ type UsageAccount struct {
 	// UpdatedAt is the last successful fetch (RFC 3339), or "" when never
 	// fetched. Meta cards carry the last-observed time instead ("as of").
 	UpdatedAt string `json:"updatedAt"`
+	// ResetCredits is present when the account holds banked usage resets.
+	ResetCredits *UsageResetCredits `json:"resetCredits,omitempty"`
+}
+
+// UsageResetCredits is the banked-reset summary shown next to a quota
+// gauge. The credit id itself never leaves the daemon.
+type UsageResetCredits struct {
+	AvailableCount int    `json:"availableCount"`
+	NextExpiresAt  string `json:"nextExpiresAt,omitempty"`
 }
 
 type UsageWindow struct {
-	Title            string  `json:"title"`
-	RemainingPercent float64 `json:"remainingPercent"`
-	HasRemaining     bool    `json:"hasRemaining"`
-	ResetText        string  `json:"resetText"`
+	Title string `json:"title"`
+	// RemainingPercent is nil when the provider gave no reading, so a real
+	// 0% (exhausted) stays distinct from unknown. HasRemaining keeps its
+	// Mac meaning: some quota is actually left (> 0).
+	RemainingPercent *float64 `json:"remainingPercent,omitempty"`
+	HasRemaining     bool     `json:"hasRemaining"`
+	ResetText        string   `json:"resetText"`
 }
 
 // Update states.

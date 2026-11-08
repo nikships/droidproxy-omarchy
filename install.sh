@@ -30,6 +30,12 @@ done
 if ! command -v jq >/dev/null 2>&1; then
   warn "jq not found; SHA-256 comes from SHA256SUMS instead of latest.json."
 fi
+if ! command -v omarchy-shell >/dev/null 2>&1; then
+  warn "omarchy-shell not found; the proxy will install, but the bar panel needs the Omarchy shell."
+fi
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+  warn "No systemd user session; the service will be installed but cannot start until you log in."
+fi
 
 # --- architecture ------------------------------------------------------------
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -139,6 +140,21 @@ func TestParseCodexWindowsFromRateLimitShape(t *testing.T) {
 	}
 }
 
+func TestParseCodexWindowsLabelsWeeklyLengthPrimaryWindow(t *testing.T) {
+	// Prolite (GPT Pro 100) has no 5-hour limit: its only window sits in the
+	// primary slot with a weekly length.
+	payload := `{"plan_type":"prolite","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":38,"limit_window_seconds":604800,"reset_after_seconds":305334,"reset_at":1794382780},"secondary_window":null}}`
+
+	var body any
+	if err := json.Unmarshal([]byte(payload), &body); err != nil {
+		t.Fatal(err)
+	}
+	windows := parseCodexWindows(body)
+	if len(windows) != 1 || windows[0].Title != "Weekly" {
+		t.Fatalf("windows = %+v, want a single Weekly window", windows)
+	}
+}
+
 func TestParseGenericWindowsPatternMatchesAndSorts(t *testing.T) {
 	payload := `{"a": {"label": "weekly usage", "percentage": 0.2}, "b": {"label": "full plan", "paid_percent": 5}}`
 	var body any
@@ -218,6 +234,7 @@ func newTestEnv(t *testing.T, codexHandler, claudeHandler, tokenHandler http.Han
 	}
 
 	env.tracker = NewTracker()
+	env.tracker.SetMetaProbe(func(string) meta.ProbeOutcome { return meta.ProbeOutcome{} })
 	env.tracker.SetBaseURLs(
 		serverURL(env.codex),
 		serverURL(env.claude),
@@ -249,6 +266,10 @@ func waitFor(t *testing.T, condition func() bool) {
 func TestRefreshFetchesCodexUsageAndSortsResults(t *testing.T) {
 	requestHeaders := make(chan *http.Request, 1)
 	env := newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/rate-limit-reset-credits") {
+			_, _ = w.Write([]byte(`{"credits":[]}`))
+			return
+		}
 		requestHeaders <- r
 		if r.Header.Get("Authorization") != "Bearer codex-token" ||
 			r.Header.Get("User-Agent") != "codex-cli" ||
@@ -312,6 +333,30 @@ func TestRefreshClearsSnapshotWhenNoEligibleAccounts(t *testing.T) {
 	}
 	if accounts := env.tracker.Accounts(); len(accounts) != 0 {
 		t.Fatalf("accounts = %v", accounts)
+	}
+}
+
+func TestRefreshSkipsCodexRequestWhileAccessTokenIsExpired(t *testing.T) {
+	var calls atomic.Int32
+	env := newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}, nil, nil)
+	path := writeAccountFile(t, env.home, "codex-a@b.com.json", map[string]any{
+		"type": "codex", "email": "a@b.com", "access_token": "stale", "refresh_token": "rt",
+	})
+	expiredAt := time.Now().Add(-time.Hour)
+	account := auth.Account{ID: filepath.Base(path), Email: "a@b.com", Type: auth.Codex, FilePath: path, Expired: &expiredAt, CanRefresh: true}
+
+	env.tracker.Refresh([]auth.Account{account}, nil, nil, nil)
+	waitFor(t, func() bool { return !env.tracker.IsRefreshing() })
+
+	accounts := env.tracker.Accounts()
+	if len(accounts) != 1 || accounts[0].Error != "Access token expired; it renews on this account's next request" {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("codex endpoint called %d times", calls.Load())
 	}
 }
 
@@ -505,11 +550,18 @@ func TestRefreshMetaReadsLocalStore(t *testing.T) {
 			WeeklyUsedPercent: 12, WeeklyResetsAt: weekly, ObservedAt: observed,
 		}
 	})
+	var probed sync.Map
+	env.tracker.SetMetaProbe(func(accountID string) meta.ProbeOutcome { probed.Store(accountID, true); return meta.ProbeOutcome{} })
 	env.tracker.Refresh(nil, nil, nil, []auth.Account{
 		{ID: "meta-1", Email: "m@x.com", Type: auth.Meta},
 		{ID: "meta-2", Email: "n@x.com", Type: auth.Meta},
 	})
 	waitFor(t, func() bool { return !env.tracker.IsRefreshing() })
+	for _, id := range []string{"meta-1", "meta-2"} {
+		if _, ok := probed.Load(id); !ok {
+			t.Errorf("%s was read without a stale-snapshot probe", id)
+		}
+	}
 
 	accounts := env.tracker.Accounts()
 	if len(accounts) != 2 {
@@ -582,9 +634,84 @@ func TestUpdateMetaAccountsOnlyTouchesMeta(t *testing.T) {
 			WeeklyUsedPercent: 2, WeeklyResetsAt: time.Now().Add(24 * time.Hour), ObservedAt: observed,
 		}
 	})
+	env.tracker.SetMetaProbe(func(string) meta.ProbeOutcome {
+		t.Error("a live Meta update must read the store without probing")
+		return meta.ProbeOutcome{}
+	})
 	env.tracker.UpdateMetaAccounts([]auth.Account{{ID: "m1", Email: "m@x.com", Type: auth.Meta}})
 	accounts := env.tracker.Accounts()
 	if len(accounts) != 1 || accounts[0].Error != "" || len(accounts[0].Windows) != 2 {
 		t.Fatalf("accounts = %+v", accounts)
+	}
+}
+
+func TestUpdateMetaAccountsReconcilesCachedSample(t *testing.T) {
+	snapshot := &meta.UsageSnapshot{
+		WindowUsedPercent: 10, WindowResetsAt: time.Now().Add(time.Hour), WindowDurationMins: 300,
+		WeeklyUsedPercent: 20, WeeklyResetsAt: time.Now().Add(24 * time.Hour), ObservedAt: time.Now(),
+	}
+	probes := 0
+	t.Setenv("HOME", t.TempDir())
+	tracker := NewTracker()
+	tracker.SetMetaSnapshots(func(string) *meta.UsageSnapshot { return snapshot })
+	tracker.SetMetaProbe(func(string) meta.ProbeOutcome { probes++; return meta.ProbeOutcome{Recorded: true} })
+	account := auth.Account{ID: "m1", Email: "m@x.com", Type: auth.Meta}
+
+	first := tracker.fetch([]auth.Account{account})
+	if len(first) != 1 || first[0].Error != "" || probes != 1 {
+		t.Fatalf("first fetch = %+v, probes = %d", first, probes)
+	}
+
+	// Live traffic observes a much newer sample inside the cache interval.
+	snapshot = &meta.UsageSnapshot{
+		WindowUsedPercent: 90, WindowResetsAt: time.Now().Add(time.Hour), WindowDurationMins: 300,
+		WeeklyUsedPercent: 80, WeeklyResetsAt: time.Now().Add(24 * time.Hour), ObservedAt: time.Now(),
+	}
+	tracker.UpdateMetaAccounts([]auth.Account{account})
+
+	second := tracker.fetch([]auth.Account{account})
+	if len(second) != 1 || len(second[0].Windows) == 0 || second[0].Windows[0].UsedPercent == nil || *second[0].Windows[0].UsedPercent != 90 {
+		t.Fatalf("second fetch = %+v, want the live 90%% sample, not the cached 10%%", second)
+	}
+	if probes != 1 {
+		t.Fatalf("probes = %d, want the probe budget untouched by reconciliation", probes)
+	}
+}
+
+func TestHasShortWindowFollowsTheAccountPayload(t *testing.T) {
+	claude := func(payload string) AccountUsage {
+		return AccountUsage{Windows: ParseClaudeWindows([]byte(payload))}
+	}
+	codex := func(payload string) AccountUsage {
+		var body any
+		if err := json.Unmarshal([]byte(payload), &body); err != nil {
+			t.Fatal(err)
+		}
+		return AccountUsage{Windows: parseCodexWindows(body)}
+	}
+
+	// Weekly-only Claude plan (Max/Ultra class): the five_hour bucket is null.
+	weeklyOnly := claude(`{"five_hour": null, "seven_day": {"utilization": 100.0, "resets_at": "2026-11-08T05:59:59Z"}}`)
+	if has, known := weeklyOnly.HasShortWindow(); has || !known {
+		t.Fatalf("weekly-only Claude: HasShortWindow = (%v, %v), want (false, true)", has, known)
+	}
+	// Idle 5-hour plan: bucket present, no window started yet.
+	idle := claude(`{"five_hour": {"utilization": 0.0, "resets_at": null}, "seven_day": {"utilization": 3.0, "resets_at": "2026-11-08T05:59:59Z"}}`)
+	if has, known := idle.HasShortWindow(); !has || !known {
+		t.Fatalf("idle Claude: HasShortWindow = (%v, %v), want (true, true)", has, known)
+	}
+	// GPT Pro (prolite): only a weekly-length window.
+	pro := codex(`{"plan_type":"prolite","rate_limit":{"primary_window":{"used_percent":38,"limit_window_seconds":604800},"secondary_window":null}}`)
+	if has, known := pro.HasShortWindow(); has || !known {
+		t.Fatalf("prolite Codex: HasShortWindow = (%v, %v), want (false, true)", has, known)
+	}
+	// Standard Codex: 5-hour plus weekly.
+	standard := codex(`{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000},"secondary_window":{"used_percent":20,"limit_window_seconds":604800}}}`)
+	if has, known := standard.HasShortWindow(); !has || !known {
+		t.Fatalf("standard Codex: HasShortWindow = (%v, %v), want (true, true)", has, known)
+	}
+	// No windows: the payload said nothing.
+	if has, known := (AccountUsage{}).HasShortWindow(); has || known {
+		t.Fatalf("empty: HasShortWindow = (%v, %v), want (false, false)", has, known)
 	}
 }

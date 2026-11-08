@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -282,6 +283,14 @@ func streamProxy(from, to net.Conn) {
 			return
 		}
 	}
+}
+
+func sendJSON(conn net.Conn, statusCode int, body []byte) {
+	headers := fmt.Sprintf(
+		"HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+		statusCode, http.StatusText(statusCode), len(body),
+	)
+	_, _ = conn.Write(append([]byte(headers), body...))
 }
 
 func sendError(conn net.Conn, statusCode int, message string) {

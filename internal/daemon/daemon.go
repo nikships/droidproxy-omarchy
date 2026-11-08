@@ -28,10 +28,10 @@ import (
 	"github.com/nikships/droidproxy-omarchy/internal/meta"
 	"github.com/nikships/droidproxy-omarchy/internal/notify"
 	"github.com/nikships/droidproxy-omarchy/internal/paths"
+	"github.com/nikships/droidproxy-omarchy/internal/prefs"
 	"github.com/nikships/droidproxy-omarchy/internal/proxy"
 	"github.com/nikships/droidproxy-omarchy/internal/updater"
 	"github.com/nikships/droidproxy-omarchy/internal/usage"
-	"github.com/nikships/droidproxy-omarchy/internal/webui"
 )
 
 // ProxyPort is the user-facing proxy port (ThinkingProxy).
@@ -45,7 +45,11 @@ type proxyServer interface {
 }
 
 // proxyFactory builds the ThinkingProxy. A variable so tests can stub it.
-var proxyFactory func() proxyServer = func() proxyServer { return proxy.New() }
+var proxyFactory = func(d *Daemon) proxyServer {
+	p := proxy.New()
+	p.UsageEndpoint = d.serveUsageEndpoint
+	return p
+}
 
 // Timing constants ported from AppDelegate/SettingsView.
 const (
@@ -72,7 +76,6 @@ type Daemon struct {
 	metaAuth  *meta.AuthManager
 	updater   *updater.Updater
 	server    *control.Server
-	web       *webui.Server
 
 	monitor *auth.DirectoryMonitor
 
@@ -93,6 +96,7 @@ type Daemon struct {
 	// Caches.
 	factoryDirty     bool
 	factoryInstalled bool
+	factoryIDs       map[string]bool
 	launchEnabled    bool
 	launchCheckedAt  time.Time
 	cliproxyVersion  string
@@ -124,7 +128,7 @@ func (d *Daemon) run() error {
 	catalog.SetMetaKeyChecker(func() bool { return d.metaStore.HasUsableAPIKey() })
 
 	d.backend = backend.New()
-	d.proxy = proxyFactory()
+	d.proxy = proxyFactory(d)
 
 	d.usage = usage.NewTracker()
 	d.usage.SetOnChange(d.notifyStateChanged)
@@ -136,7 +140,6 @@ func (d *Daemon) run() error {
 	})
 
 	d.server = control.NewServer(d)
-	d.web = webui.NewServer(d)
 	d.wireEvents()
 
 	d.authMgr.CheckAuthStatus()
@@ -152,18 +155,13 @@ func (d *Daemon) run() error {
 		d.metaAuth.RefreshAPIKeyIfNeeded(false, nil)
 	}
 	go d.metaKeyRefreshLoop()
+	go newWindowPrimer(d.sendWindowPrimers, d.primerApplies).run(d.ctx)
 	d.updater.StartScheduled(d.ctx)
 
 	// The control API comes up last: once it answers, clients expect every
-	// action to work. The settings web UI serves alongside it; a UI bind
-	// failure is logged but not fatal (the proxy itself still works).
+	// action to work.
 	apiErr := make(chan error, 1)
 	go func() { apiErr <- d.server.ListenAndServe(d.ctx, "") }()
-	go func() {
-		if err := d.web.ListenAndServe(d.ctx); err != nil {
-			logx.Logf("[Daemon] Settings web UI failed to start: %v", err)
-		}
-	}()
 
 	select {
 	case <-d.ctx.Done():
@@ -187,7 +185,6 @@ func (d *Daemon) shutdown() {
 	d.proxy.Stop()
 	d.backend.Stop()
 	_ = d.server.Close()
-	_ = d.web.Close()
 }
 
 // wireEvents bridges the in-process event bus (the NotificationCenter
@@ -238,19 +235,33 @@ func (d *Daemon) onMetaAccountsChanged() {
 // `response.subscription_usage` event, so Meta quota updates live without
 // refetching the other providers.
 func (d *Daemon) onMetaUsageChanged() {
-	d.usage.UpdateMetaAccounts(d.authMgr.Accounts(auth.Meta))
+	d.usage.UpdateMetaAccounts(d.usageAccounts(auth.Meta))
 	d.notifyStateChanged()
 }
 
 func (d *Daemon) onAuthStateChanged() {
 	d.invalidateFactory()
+	d.refreshUsageIfAccountsChanged()
+	d.notifyStateChanged()
+}
+
+func (d *Daemon) refreshUsageIfAccountsChanged() {
 	if sig := d.usageSignature(); sig != d.usageSig {
 		d.mu.Lock()
 		d.usageSig = sig
 		d.mu.Unlock()
 		d.refreshUsage()
 	}
-	d.notifyStateChanged()
+}
+
+// usageAccounts is the account list the quota tracker reads for st. A
+// switched-off Grok or Meta provider shows no usage (SettingsView parity);
+// for Meta this also keeps a stale card from spending quota on a probe.
+func (d *Daemon) usageAccounts(st auth.ServiceType) []auth.Account {
+	if (st == auth.Grok || st == auth.Meta) && !prefs.IsProviderEnabled(string(st)) {
+		return nil
+	}
+	return d.authMgr.Accounts(st)
 }
 
 // usageSignature mirrors SettingsView.codexUsageAccountSignature, extended to
@@ -260,28 +271,50 @@ func (d *Daemon) onAuthStateChanged() {
 func (d *Daemon) usageSignature() string {
 	var parts []string
 	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta} {
-		var ids []string
-		for _, a := range d.authMgr.Accounts(st) {
-			if a.Disabled {
-				continue
-			}
-			if st != auth.Meta && a.IsExpired() {
-				continue
-			}
-			ids = append(ids, a.ID)
-		}
-		sort.Strings(ids)
-		parts = append(parts, strings.Join(ids, "|"))
+		parts = append(parts, providerUsageSignature(st, d.usageAccounts(st)))
 	}
 	return strings.Join(parts, "||")
 }
 
+// providerUsageSignature fingerprints one provider's usage-relevant account
+// set. Refreshable accounts carry an access-expired mark: IsExpired() is
+// false for them on both sides of an in-place token renewal, so IDs alone
+// would never retrigger a refresh and the expiry error card would stick.
+func providerUsageSignature(st auth.ServiceType, accounts []auth.Account) string {
+	var ids []string
+	for _, a := range accounts {
+		if a.Disabled {
+			continue
+		}
+		if st != auth.Meta && a.IsExpired() {
+			continue
+		}
+		id := a.ID
+		if st != auth.Meta && a.IsAccessExpired() {
+			id += "#access-expired"
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, "|")
+}
+
 func (d *Daemon) refreshUsage() {
-	codex := d.authMgr.Accounts(auth.Codex)
-	claudeAccounts := d.authMgr.Accounts(auth.Claude)
-	grokAccounts := d.authMgr.Accounts(auth.Grok)
-	metaAccounts := d.authMgr.Accounts(auth.Meta)
-	go d.usage.Refresh(codex, claudeAccounts, grokAccounts, metaAccounts)
+	go d.usage.Refresh(d.usageAccounts(auth.Codex), d.usageAccounts(auth.Claude), d.usageAccounts(auth.Grok), d.usageAccounts(auth.Meta))
+}
+
+// serveUsageEndpoint answers ThinkingProxy's GET /droidproxy/usage.
+func (d *Daemon) serveUsageEndpoint(requestPath string) (int, []byte, bool) {
+	filter, ok := usage.ParseEndpointFilter(requestPath)
+	if !ok {
+		return 0, nil, false
+	}
+	accounts := map[auth.ServiceType][]auth.Account{}
+	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta} {
+		accounts[st] = d.authMgr.Accounts(st)
+	}
+	status, body := d.usage.ServeEndpoint(filter, accounts, time.Now())
+	return status, body, true
 }
 
 func (d *Daemon) metaKeyRefreshLoop() {
@@ -388,19 +421,13 @@ func (d *Daemon) notifyStateChanged() {
 	if d.server != nil {
 		d.server.NotifyStateChanged()
 	}
-	if d.web != nil {
-		d.web.NotifyStateChanged()
-	}
 }
 
 // postMessageEvent broadcasts an async result to control API clients (the
-// macOS app's "Authentication Result" alerts) and web UI browsers.
+// macOS app's "Authentication Result" alerts).
 func (d *Daemon) postMessageEvent(title, body, level string) {
 	if d.server != nil {
 		d.server.PostMessage(title, body, level)
-	}
-	if d.web != nil {
-		d.web.PostMessage(title, body, level)
 	}
 }
 
