@@ -236,6 +236,8 @@ function cursorEntries(state, ui) {
 
   add({ id: "server", kind: "server" })
   if (state && state.server && state.server.url) add({ id: "copy-url", kind: "copy-url" })
+  if (state && state.update && state.update.state === "available")
+    add({ id: "update-install", kind: "update-install" })
   var pending = signIn(state)
   if (pending) {
     add({ id: "signin-copy", kind: "signin-copy" })
@@ -297,8 +299,6 @@ function cursorEntries(state, ui) {
     add({ id: "auth-folder", kind: "open", method: "open.authFolder" })
     add({ id: "logs-folder", kind: "open", method: "open.logsFolder" })
     add({ id: "update-check", kind: "update-check" })
-    if (state && state.update && state.update.state === "available")
-      add({ id: "update-install", kind: "update-install" })
     add({ id: "update-auto-check", kind: "setting", key: "autoCheckUpdates" })
     add({ id: "update-auto-install", kind: "setting", key: "autoInstallUpdates" })
   }

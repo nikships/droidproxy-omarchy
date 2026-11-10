@@ -596,6 +596,35 @@ Panel {
             font.pixelSize: Style.font.bodySmall
           }
 
+          // The bar badge says an update is ready, so the install action
+          // lives here at the top, not buried in Advanced.
+          Column {
+            visible: root.updateAvailable
+            width: parent.width
+            spacing: Style.space(6)
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: strings.t("update.available").arg(root.latestVersion)
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+            Button {
+              width: parent.width
+              text: strings.t("update.install")
+              active: true
+              hasCursor: root.hot("update-install")
+              onHasCursorChanged: if (hasCursor) root.revealItem(this)
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onHovered: function(on) { if (on) root.aim("update-install") }
+              onClicked: root.service && root.service.call("update.install", {}, function(result) { root.report(result, result.message || "") })
+            }
+          }
+
           Button {
             width: parent.width
             text: strings.t("copy.url")
@@ -962,17 +991,6 @@ Panel {
                 fontFamily: root.fontFamily
                 onHovered: function(on) { if (on) root.aim("update-check") }
                 onClicked: root.service && root.service.call("update.check", {})
-              }
-              Button {
-                visible: root.updateAvailable
-                text: strings.t("update.install")
-                bordered: true
-                hasCursor: root.hot("update-install")
-                onHasCursorChanged: if (hasCursor) root.revealItem(this)
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onHovered: function(on) { if (on) root.aim("update-install") }
-                onClicked: root.service && root.service.call("update.install", {}, function(result) { root.report(result, result.message || "") })
               }
             }
             Toggle {
