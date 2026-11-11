@@ -3,6 +3,7 @@ package journal
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestBeginAdmitsInferencePostsOnly(t *testing.T) {
@@ -131,7 +132,7 @@ func TestClientSession(t *testing.T) {
 }
 
 func TestBeginReadsRawHeaders(t *testing.T) {
-	j := &Journal{enabled: func() bool { return true }}
+	j := &Journal{enabled: func() bool { return true }, seats: newSeatIndex(t.TempDir())}
 	o := j.Begin(RequestContext{
 		Method:        "POST",
 		Path:          "/v1/messages",
@@ -139,8 +140,9 @@ func TestBeginReadsRawHeaders(t *testing.T) {
 		Head:          "POST /v1/messages HTTP/1.1\r\nX-Session-ID: \t header-session-1 \r\nx-droidproxy-origin: window-primer",
 		Body:          `{"model":"claude-haiku-4-5-20251001"}`,
 	})
-	if deref(o.session) != "header-session-1" || o.origin != "primer" || o.provider != "claude" {
-		t.Fatalf("session=%q origin=%s provider=%s", deref(o.session), o.origin, o.provider)
+	rec, _ := finish(o, EndEOF, time.Now())
+	if deref(rec.ClientSession) != "header-session-1" || rec.Origin != "primer" || rec.Provider != "claude" {
+		t.Fatalf("session=%q origin=%s provider=%s", deref(rec.ClientSession), rec.Origin, rec.Provider)
 	}
 }
 

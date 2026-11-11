@@ -19,7 +19,7 @@ import (
 const (
 	// seatMissRefreshInterval limits directory rescans caused by unknown indexes.
 	seatMissRefreshInterval = time.Second
-	// maxSeatFileBytes bounds how much of one auth file is read.
+	// maxSeatFileBytes: a larger auth file is not read, so it is not indexed.
 	maxSeatFileBytes = 1 << 20
 )
 
@@ -98,7 +98,7 @@ func (s *seatIndex) bind(index string, now time.Time) (seatBinding, bool) {
 		return seatBinding{}, false
 	}
 	entry := entries[0]
-	fp, err := lstatFingerprint(entry.path)
+	fp, bindableNow, err := lstatEntry(entry.path)
 	if err != nil {
 		s.stale = true
 		return seatBinding{}, false
@@ -112,7 +112,7 @@ func (s *seatIndex) bind(index string, now time.Time) (seatBinding, bool) {
 		entry = fresh
 		entries[0] = fresh
 	}
-	if !entry.bindable {
+	if !entry.bindable || !bindableNow {
 		return seatBinding{}, false
 	}
 	return seatBinding{path: entry.path, fp: entry.fp, id: entry.id}, true
@@ -120,7 +120,8 @@ func (s *seatIndex) bind(index string, now time.Time) (seatBinding, bool) {
 
 // stillBound revalidates a binding at finalization: the index is still
 // unique in the current map and names the same file, which still has the
-// bound fingerprint and is still readable.
+// bound fingerprint, is still a regular file owned by this user, and is
+// still readable.
 func (s *seatIndex) stillBound(index string, b seatBinding, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -131,7 +132,7 @@ func (s *seatIndex) stillBound(index string, b seatBinding, now time.Time) bool 
 	if len(entries) != 1 || entries[0].path != b.path {
 		return false
 	}
-	if fp, err := lstatFingerprint(b.path); err != nil || fp != b.fp {
+	if fp, bindable, err := lstatEntry(b.path); err != nil || fp != b.fp || !bindable {
 		return false
 	}
 	f, err := os.OpenFile(b.path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
@@ -190,7 +191,7 @@ func readSeatEntry(path string) (seatEntry, string, bool) {
 		return seatEntry{}, "", false
 	}
 	defer f.Close()
-	if opened, err := f.Stat(); err != nil || !opened.Mode().IsRegular() {
+	if opened, err := f.Stat(); err != nil || !opened.Mode().IsRegular() || opened.Size() > maxSeatFileBytes {
 		return seatEntry{}, "", false
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxSeatFileBytes+1))
@@ -233,6 +234,17 @@ func readSeatEntry(path string) (seatEntry, string, bool) {
 func ownedByMe(info fs.FileInfo) bool {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	return ok && int(st.Uid) == os.Getuid()
+}
+
+// lstatEntry returns path's fingerprint and whether it is a regular file
+// owned by this user. Ownership is not part of the fingerprint, since a
+// chown changes neither size, mtime nor inode.
+func lstatEntry(path string) (fingerprint, bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fingerprint{}, false, err
+	}
+	return fingerprintOf(info), info.Mode().IsRegular() && ownedByMe(info), nil
 }
 
 func lstatFingerprint(path string) (fingerprint, error) {

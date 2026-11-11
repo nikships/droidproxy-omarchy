@@ -24,23 +24,26 @@ const (
 	shutdownFlushLimit = 2 * time.Second
 	// diagnosticsInterval is the least time between drop and failure reports.
 	diagnosticsInterval = time.Minute
+	// diagnosticsBacklog bounds the reports waiting for the log; a report
+	// that finds it full is skipped and its counts go into the next one.
+	diagnosticsBacklog = 8
 )
 
 var errLockTimeout = errors.New("journal file stayed locked by another writer")
 
-type queuedLine struct {
-	month string
-	line  []byte
-}
-
 // recordWriter appends journal lines from one goroutine behind a bounded queue.
 // enqueue never blocks or logs: a full queue drops the record, and drops and
 // write failures are only counted there. The writer goroutine and close
-// report them in aggregate.
+// report them in aggregate through a separate logging goroutine, so a log
+// sink that stops reading never holds up appends or close.
 type recordWriter struct {
 	dir   string
-	queue chan queuedLine
+	queue chan pending
 	done  chan struct{}
+
+	diagnostics chan string
+	// logged is closed once every queued diagnostic has been logged.
+	logged chan struct{}
 
 	mu     sync.RWMutex
 	closed bool
@@ -53,30 +56,32 @@ type recordWriter struct {
 	failed    atomic.Uint64
 	lastError atomic.Value
 
+	// reportMu guards the report state and the diagnostics channel; it is
+	// never held while logging.
 	reportMu        sync.Mutex
 	reportedDropped uint64
 	reportedFailed  uint64
 	lastReport      time.Time
+	diagnosticsShut bool
 }
 
 // newRecordWriter starts a writer for dir (created 0700 on first append).
 func newRecordWriter(dir string, queueSize int) *recordWriter {
 	w := &recordWriter{
-		dir:   dir,
-		queue: make(chan queuedLine, queueSize),
-		done:  make(chan struct{}),
+		dir:         dir,
+		queue:       make(chan pending, queueSize),
+		done:        make(chan struct{}),
+		diagnostics: make(chan string, diagnosticsBacklog),
+		logged:      make(chan struct{}),
 	}
 	go w.run()
+	go w.logDiagnostics()
 	return w
 }
 
-// enqueue queues rec for appending to its started_at month file.
-func (w *recordWriter) enqueue(rec Record) {
-	line, err := encodeLine(rec)
-	if err != nil {
-		w.countFailure(err)
-		return
-	}
+// enqueue queues a finalized record for appending to its started_at month
+// file.
+func (w *recordWriter) enqueue(p pending) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	if w.closed {
@@ -84,15 +89,17 @@ func (w *recordWriter) enqueue(rec Record) {
 		return
 	}
 	select {
-	case w.queue <- queuedLine{month: rec.StartedAt[:7], line: line}:
+	case w.queue <- p:
 	default:
 		w.dropped.Add(1)
 	}
 }
 
-// close stops accepting records and waits for queued ones until the
-// shutdown flush deadline; records still queued then are counted as dropped.
+// close stops accepting records and waits for queued ones and their
+// diagnostics until the shutdown flush deadline; records still queued then
+// are counted as dropped.
 func (w *recordWriter) close() {
+	deadline := time.Now().Add(shutdownFlushLimit)
 	w.mu.Lock()
 	if !w.closed {
 		w.closed = true
@@ -101,13 +108,45 @@ func (w *recordWriter) close() {
 	w.mu.Unlock()
 	select {
 	case <-w.done:
-	case <-time.After(shutdownFlushLimit):
+	case <-time.After(time.Until(deadline)):
 		w.abandoned.Store(true)
 		for range w.queue {
 			w.dropped.Add(1)
 		}
 	}
 	w.report(true)
+	select {
+	case <-w.logged:
+	case <-time.After(time.Until(deadline)):
+	}
+}
+
+func (w *recordWriter) logDiagnostics() {
+	defer close(w.logged)
+	for msg := range w.diagnostics {
+		logx.Logf("%s", msg)
+	}
+}
+
+// diagnose queues msg for the log without waiting; it is skipped when the
+// backlog is full or closed.
+func (w *recordWriter) diagnose(msg string) {
+	w.reportMu.Lock()
+	defer w.reportMu.Unlock()
+	w.diagnoseLocked(msg)
+}
+
+// diagnoseLocked reports whether msg was queued.
+func (w *recordWriter) diagnoseLocked(msg string) bool {
+	if w.diagnosticsShut {
+		return false
+	}
+	select {
+	case w.diagnostics <- msg:
+		return true
+	default:
+		return false
+	}
 }
 
 func (w *recordWriter) countFailure(err error) {
@@ -132,39 +171,57 @@ func (w *recordWriter) run() {
 	}
 }
 
-func (w *recordWriter) write(q queuedLine) {
+func (w *recordWriter) write(p pending) {
 	if w.abandoned.Load() {
 		w.dropped.Add(1)
 		return
 	}
-	switch err := appendLine(w.dir, q.month, q.line); {
+	rec := p.record()
+	line, err := encodeLine(rec)
+	if err != nil {
+		w.countFailure(err)
+		return
+	}
+	removed, err := appendLine(w.dir, rec.StartedAt[:7], line)
+	switch {
 	case errors.Is(err, errLockTimeout):
 		w.dropped.Add(1)
 	case err != nil:
 		w.countFailure(err)
 	}
+	if removed > 0 {
+		w.diagnose(fmt.Sprintf("[RequestJournal] Removed %d bytes of an incomplete line from %s", removed, monthFile(w.dir, rec.StartedAt[:7])))
+	}
 }
 
-// report logs drops and write failures since the last report, at most once
-// per diagnosticsInterval; the final report at close gives the totals.
+// report queues a log line for drops and write failures since the last
+// report, at most once per diagnosticsInterval; the final report at close
+// gives the totals and closes the diagnostics backlog.
 func (w *recordWriter) report(final bool) {
 	w.reportMu.Lock()
 	defer w.reportMu.Unlock()
+	if w.diagnosticsShut {
+		return
+	}
 	dropped, failed := w.dropped.Load(), w.failed.Load()
 	lastError, _ := w.lastError.Load().(string)
 	if final {
 		if dropped != 0 || failed != 0 {
-			logx.Logf("[RequestJournal] Closed with %d records dropped and %d write failures in total (last error: %s)", dropped, failed, lastError)
+			w.diagnoseLocked(fmt.Sprintf("[RequestJournal] Closed with %d records dropped and %d write failures in total (last error: %s)", dropped, failed, lastError))
 		}
-		w.reportedDropped, w.reportedFailed = dropped, failed
+		w.diagnosticsShut = true
+		close(w.diagnostics)
 		return
 	}
 	if dropped == w.reportedDropped && failed == w.reportedFailed {
 		return
 	}
-	if now := time.Now(); now.Sub(w.lastReport) >= diagnosticsInterval {
-		logx.Logf("[RequestJournal] %d records dropped and %d write failures since the last report (last error: %s)",
-			dropped-w.reportedDropped, failed-w.reportedFailed, lastError)
+	now := time.Now()
+	if now.Sub(w.lastReport) < diagnosticsInterval {
+		return
+	}
+	if w.diagnoseLocked(fmt.Sprintf("[RequestJournal] %d records dropped and %d write failures since the last report (last error: %s)",
+		dropped-w.reportedDropped, failed-w.reportedFailed, lastError)) {
 		w.reportedDropped, w.reportedFailed, w.lastReport = dropped, failed, now
 	}
 }
@@ -174,34 +231,35 @@ func monthFile(dir, month string) string {
 }
 
 // appendLine appends one complete line under an exclusive advisory lock and
-// fsyncs it, so writers in other processes never interleave with it.
-func appendLine(dir, month string, line []byte) error {
+// fsyncs it, so writers in other processes never interleave with it. It
+// returns how many bytes of an incomplete last line it removed first.
+func appendLine(dir, month string, line []byte) (removed int64, err error) {
 	if err := ensurePrivateDir(dir); err != nil {
-		return err
+		return 0, err
 	}
 	f, created, err := openJournalFile(monthFile(dir, month))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer f.Close()
 	if err := lockWithin(f, lockWaitLimit); err != nil {
-		return err
+		return 0, err
 	}
-	if err := repairTornTail(f); err != nil {
-		return err
+	if removed, err = repairTornTail(f); err != nil {
+		return removed, err
 	}
 	// os.File.Write retries short writes until the whole line is written or
 	// an error occurs; a partial line left by an error is repaired next time.
 	if _, err := f.Write(line); err != nil {
-		return err
+		return removed, err
 	}
 	if err := f.Sync(); err != nil {
-		return err
+		return removed, err
 	}
 	if created {
-		return syncDir(dir)
+		return removed, syncDir(dir)
 	}
-	return nil
+	return removed, nil
 }
 
 // lockWithin takes an exclusive advisory lock on f, giving up after limit.
@@ -279,19 +337,20 @@ func checkOwner(info fs.FileInfo) error {
 	return nil
 }
 
-// repairTornTail truncates an incomplete last line left by a crash mid-append.
-func repairTornTail(f *os.File) error {
+// repairTornTail truncates an incomplete last line left by a crash
+// mid-append and returns how many bytes it removed.
+func repairTornTail(f *os.File) (int64, error) {
 	info, err := f.Stat()
 	if err != nil || info.Size() == 0 {
-		return err
+		return 0, err
 	}
 	size := info.Size()
 	var last [1]byte
 	if _, err := f.ReadAt(last[:], size-1); err != nil {
-		return err
+		return 0, err
 	}
 	if last[0] == '\n' {
-		return nil
+		return 0, nil
 	}
 	buf := make([]byte, 64<<10)
 	end := size
@@ -299,7 +358,7 @@ func repairTornTail(f *os.File) error {
 		start := max(end-int64(len(buf)), 0)
 		chunk := buf[:end-start]
 		if _, err := f.ReadAt(chunk, start); err != nil {
-			return err
+			return 0, err
 		}
 		if i := bytes.LastIndexByte(chunk, '\n'); i >= 0 {
 			end = start + int64(i) + 1
@@ -307,8 +366,10 @@ func repairTornTail(f *os.File) error {
 		}
 		end = start
 	}
-	logx.Logf("[RequestJournal] Removed %d bytes of an incomplete line from %s", size-end, f.Name())
-	return f.Truncate(end)
+	if err := f.Truncate(end); err != nil {
+		return 0, err
+	}
+	return size - end, nil
 }
 
 func syncDir(dir string) error {

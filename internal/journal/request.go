@@ -174,17 +174,39 @@ func clientSession(headers [][2]string, body map[string]json.RawMessage) *string
 // byte decides the form; a string starting with "{" is never read as legacy.
 func metadataSessionID(userID string) (string, bool) {
 	if strings.HasPrefix(userID, "{") {
-		var obj map[string]json.RawMessage
-		if json.Unmarshal([]byte(userID), &obj) != nil {
-			return "", false
-		}
-		return jsonString(obj["session_id"])
+		return jsonString(strictObject([]byte(userID))["session_id"])
 	}
 	i := strings.LastIndex(userID, "_session_")
 	if i < 0 {
 		return "", false
 	}
 	return userID[i+len("_session_"):], true
+}
+
+// requestFacts are the record fields read from the request. The body is
+// parsed on its own goroutine so the relay never waits for it; done is
+// closed once the fields are set.
+type requestFacts struct {
+	done     chan struct{}
+	model    *string
+	provider string
+	session  *string
+}
+
+func readRequest(endpoint string, headers [][2]string, body string) *requestFacts {
+	f := &requestFacts{done: make(chan struct{})}
+	go func() {
+		defer close(f.done)
+		obj := strictObject([]byte(body))
+		f.model = requestedModel(endpoint, obj)
+		model := ""
+		if f.model != nil {
+			model = *f.model
+		}
+		f.provider = deriveProvider(model, endpoint)
+		f.session = clientSession(headers, obj)
+	}()
+	return f
 }
 
 func requestedModel(endpoint string, body map[string]json.RawMessage) *string {

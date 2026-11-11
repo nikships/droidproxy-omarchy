@@ -3,8 +3,10 @@ package journal
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -97,7 +99,7 @@ func observeSeat(t *testing.T, j *Journal, index string, between func()) *Seat {
 	if rec, ok := deliver(o, []byte("{}"), time.Now(), time.Now()); ok {
 		return rec.Seat
 	}
-	rec, _ := o.finishAt(EndEOF, time.Now())
+	rec, _ := finish(o, EndEOF, time.Now())
 	return rec.Seat
 }
 
@@ -286,5 +288,132 @@ func TestSeatRevalidatedAtFinalization(t *testing.T) {
 	})
 	if seat == nil || *seat != (Seat{AuthIndex: index, Role: roleServed}) {
 		t.Errorf("index no longer unique at finalization: seat = %+v", seat)
+	}
+}
+
+// indexedPaths lists the paths the seat index holds after a fresh scan.
+func indexedPaths(s *seatIndex) map[string]bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshLocked(time.Now())
+	paths := map[string]bool{}
+	for _, entries := range s.byIndex {
+		for _, e := range entries {
+			paths[e.path] = true
+		}
+	}
+	return paths
+}
+
+// authFileOfSize writes a claude auth file of exactly size bytes.
+func authFileOfSize(t *testing.T, dir, name string, size int) string {
+	t.Helper()
+	prefix := `{"type":"claude","email":"seat@example.invalid","pad":"`
+	data := prefix + strings.Repeat("p", size-len(prefix)-2) + `"}`
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	abs, _ := filepath.Abs(path)
+	return abs
+}
+
+func TestSeatFileSizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	atLimit := authFileOfSize(t, dir, "claude-at-limit.json", 1<<20)
+	over := authFileOfSize(t, dir, "claude-over.json", 1<<20+1)
+	bigTarget := authFileOfSize(t, t.TempDir(), "big.json", 1<<20+1)
+	link := filepath.Join(dir, "claude-big-link.json")
+	if err := os.Symlink(bigTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	seats := newSeatIndex(dir)
+	indexed := indexedPaths(seats)
+	if !indexed[atLimit] || indexed[over] || indexed[link] {
+		t.Fatalf("indexed %v", indexed)
+	}
+	j := &Journal{enabled: func() bool { return true }, seats: seats}
+	if seat := observeSeat(t, j, authIndex("claude", atLimit), func() {}); seat == nil || seat.File != "claude-at-limit.json" {
+		t.Errorf("file of exactly 1 MiB: seat = %+v", seat)
+	}
+	for _, path := range []string{over, link} {
+		index := authIndex("claude", path)
+		if seat := observeSeat(t, j, index, func() {}); seat == nil || *seat != (Seat{AuthIndex: index, Role: roleServed}) {
+			t.Errorf("%s: seat = %+v", path, seat)
+		}
+	}
+}
+
+func TestNonRegularEntriesAreNotIndexed(t *testing.T) {
+	// A short directory keeps the socket path within the platform limit.
+	dir, err := os.MkdirTemp("/tmp", "seats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	regular := writeAuthFile(t, dir, "claude-regular.json", map[string]any{"type": "claude"})
+	fifo := filepath.Join(dir, "f.json")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(dir, "s.json")
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	fifoAbs, _ := filepath.Abs(fifo)
+	socketAbs, _ := filepath.Abs(socket)
+	done := make(chan map[string]bool)
+	go func() { done <- indexedPaths(newSeatIndex(dir)) }()
+	select {
+	case indexed := <-done:
+		if !indexed[regular] || indexed[fifoAbs] || indexed[socketAbs] || len(indexed) != 1 {
+			t.Fatalf("indexed %v", indexed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("scan blocked on a non-regular entry")
+	}
+}
+
+// chownKeepingFingerprint changes path's owner and checks that size, mtime,
+// and inode stay the same, so only the owner tells the files apart.
+func chownKeepingFingerprint(t *testing.T, path string, uid int) {
+	t.Helper()
+	before, err := lstatFingerprint(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(path, uid, uid); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := lstatFingerprint(path); after != before {
+		t.Fatalf("fingerprint changed from %+v to %+v", before, after)
+	}
+}
+
+func TestSeatOwnerChangeWithSameFingerprintIsNotBound(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("changing a file's owner needs root")
+	}
+	dir := t.TempDir()
+	path := writeAuthFile(t, dir, "claude-owned.json", map[string]any{"type": "claude", "email": "seat@example.invalid"})
+	index := authIndex("claude", path)
+	only := Seat{AuthIndex: index, Role: roleServed}
+	j := &Journal{enabled: func() bool { return true }, seats: newSeatIndex(dir)}
+
+	if seat := observeSeat(t, j, index, func() {}); seat == nil || seat.Email != "seat@example.invalid" {
+		t.Fatalf("own file: seat = %+v", seat)
+	}
+	chownKeepingFingerprint(t, path, 65534)
+	if seat := observeSeat(t, j, index, func() {}); seat == nil || *seat != only {
+		t.Errorf("cached entry after an owner change: seat = %+v", seat)
+	}
+	chownKeepingFingerprint(t, path, 0)
+	if seat := observeSeat(t, j, index, func() {}); seat == nil || seat.Email != "seat@example.invalid" {
+		t.Fatalf("owner changed back: seat = %+v", seat)
+	}
+	if seat := observeSeat(t, j, index, func() { chownKeepingFingerprint(t, path, 65534) }); seat == nil || *seat != only {
+		t.Errorf("owner changed between binding and finalization: seat = %+v", seat)
 	}
 }

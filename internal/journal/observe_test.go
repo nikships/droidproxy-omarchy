@@ -9,13 +9,21 @@ import (
 
 // deliver relays one buffer that the client write accepted in full.
 func deliver(o *Observation, p []byte, readAt, writeAt time.Time) (Record, bool) {
-	return o.deliverAt(p, readAt, writeAt)
+	fin, ok := o.deliverAt(p, readAt, writeAt)
+	return fin.record(), ok
 }
 
 // failWrite relays one buffer whose client write accepted only its first
 // accepted bytes and then failed.
 func failWrite(o *Observation, p []byte, accepted int, readAt, writeAt time.Time) (Record, bool) {
-	return o.writeFailedAt(p, accepted, readAt, writeAt)
+	fin, ok := o.writeFailedAt(p, accepted, readAt, writeAt)
+	return fin.record(), ok
+}
+
+// finish ends the observation with end at now.
+func finish(o *Observation, end End, now time.Time) (Record, bool) {
+	fin, ok := o.finishAt(end, now)
+	return fin.record(), ok
 }
 
 var testStart = time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
@@ -56,7 +64,7 @@ func observeReads(j *Journal, ctx RequestContext, reads [][]byte, end End) Recor
 			return rec
 		}
 	}
-	rec, _ := o.finishAt(end, at(200))
+	rec, _ := finish(o, end, at(200))
 	return rec
 }
 
@@ -177,6 +185,15 @@ func TestMalformedFramingIsUpstreamError(t *testing.T) {
 		{"header line without colon", "HTTP/1.1 200 OK\r\nBroken\r\nContent-Length: 0\r\n\r\n", false},
 		{"empty header name", "HTTP/1.1 200 OK\r\n: value\r\nContent-Length: 0\r\n\r\n", false},
 		{"header name with space", "HTTP/1.1 200 OK\r\nBad Name: value\r\nContent-Length: 0\r\n\r\n", false},
+		{"header line ends in bare LF", "HTTP/1.1 200 OK\r\nX-A: b\nContent-Length: 0\r\n\r\n", false},
+		{"blank line ending the head is a bare LF", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\n", false},
+		{"trailer line without colon", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nBroken\r\n\r\n", true},
+		{"trailer line with empty name", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n: x\r\n\r\n", true},
+		{"trailer line ends in bare LF", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-T: y\n\r\n", true},
+		{"last trailer line is a bare LF", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\n", true},
+		{"chunk size followed by a space", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5 \r\nhello\r\n0\r\n\r\n", false},
+		{"chunk size preceded by a tab", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\t5\r\nhello\r\n0\r\n\r\n", false},
+		{"space before a chunk extension", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5 ;ext\r\nhello\r\n0\r\n\r\n", false},
 		{"chunk data ends in bare LF", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\n0\r\n\r\n", true},
 		{"chunk data followed by other bytes", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXY\r\n0\r\n\r\n", true},
 		{"last chunk line ends in bare LF", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\n\r\n", true},
@@ -188,10 +205,18 @@ func TestMalformedFramingIsUpstreamError(t *testing.T) {
 			t.Errorf("%s: outcome %s status %s tokens %s ttft %v", c.name, rec.Outcome, statusOrNull(rec.Status), tokensString(rec.Tokens), rec.TTFTMS)
 		}
 	}
-	// Bytes after valid chunk data are fine when they are exactly CRLF.
-	rec := observeEverySplit(t, chatRequest, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n0\r\nTrailer: x\r\n\r\n", EndEOF)
-	if rec.Outcome != outcomeComplete {
-		t.Errorf("valid chunked body: outcome %s", rec.Outcome)
+	for _, wire := range []string{
+		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n0\r\nTrailer: x\r\n\r\n",
+		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0000000000000000005;a b\r\nhello\r\n0;\r\nA: 1\r\nB:\r\n\r\n",
+		"HTTP/1.1 200 OK\r\nStatus-Echo:\r\nContent-Length: 0\r\n\r\n",
+	} {
+		if rec := observeEverySplit(t, chatRequest, wire, EndEOF); rec.Outcome != outcomeComplete {
+			t.Errorf("%q: outcome %s", wire, rec.Outcome)
+		}
+	}
+	rec := observeEverySplit(t, chatRequest, "HTTP/1.1 200 OK\nContent-Length: 0\r\n\r\n", EndEOF)
+	if rec.Outcome != outcomeUpstreamError || rec.Status != nil {
+		t.Errorf("status line ending in bare LF: outcome %s status %s", rec.Outcome, statusOrNull(rec.Status))
 	}
 }
 
@@ -208,6 +233,16 @@ func TestHeadCapCountsFromTheFinalHead(t *testing.T) {
 	interim := observeEverySplit(t, messagesRequest, "HTTP/1.1 100 Continue\r\nX-Pad: "+strings.Repeat("b", 60<<10)+"\r\n\r\n"+padHead(64<<10)+anthropicMessage, EndEOF)
 	if interim.Outcome != outcomeComplete || interim.Tokens == nil {
 		t.Errorf("interim head before a 64 KiB head: outcome %s tokens %s", interim.Outcome, tokensString(interim.Tokens))
+	}
+	unterminated := strings.TrimSuffix(padHead(64<<10+4), "\r\n\r\n")
+	if len(unterminated) != 64<<10 {
+		t.Fatalf("unterminated head is %d bytes", len(unterminated))
+	}
+	if rec := observeEverySplit(t, messagesRequest, unterminated, EndEOF); rec.Outcome != outcomeUpstreamError || statusOrNull(rec.Status) != "200" {
+		t.Errorf("64 KiB without a terminator, then EOF: outcome %s status %s", rec.Outcome, statusOrNull(rec.Status))
+	}
+	if rec := observeEverySplit(t, messagesRequest, unterminated[:len(unterminated)-1], EndEOF); rec.Outcome != outcomeUpstreamClosed {
+		t.Errorf("one byte under the cap without a terminator: outcome %s", rec.Outcome)
 	}
 	over := observeEverySplit(t, messagesRequest, padHead(64<<10+1)+anthropicMessage, EndEOF)
 	if over.Outcome != outcomeUpstreamError || statusOrNull(over.Status) != "200" || over.Tokens != nil || over.ResponseModel != nil || over.TTFTMS != nil {
@@ -299,6 +334,13 @@ func TestChatUsagePublishedByQualifyingChunk(t *testing.T) {
 		{"finish reason then EOF", chunk(stop, `{"prompt_tokens":9,"completion_tokens":5}`), "9/0/null/5/null", outcomeUpstreamClosed},
 		{"empty choices then EOF", chunk(`[]`, `{"prompt_tokens":9,"completion_tokens":5}`), "9/0/null/5/null", outcomeUpstreamClosed},
 		{"later qualifying chunk replaces", chunk(stop, `{"prompt_tokens":9,"completion_tokens":5}`) + chunk(`[]`, `{"prompt_tokens":20,"completion_tokens":6}`) + "data: [DONE]\n\n", "20/0/null/6/null", outcomeComplete},
+		{"later chunk with choices absent replaces", chunk(stop, `{"prompt_tokens":9,"completion_tokens":5}`) + `data: {"usage":{"prompt_tokens":21,"completion_tokens":7}}` + "\n\ndata: [DONE]\n\n", "21/0/null/7/null", outcomeComplete},
+		{"later chunk with null choices replaces", chunk(stop, `{"prompt_tokens":9,"completion_tokens":5}`) + chunk(`null`, `{"prompt_tokens":22,"completion_tokens":7}`) + "data: [DONE]\n\n", "22/0/null/7/null", outcomeComplete},
+		{"later chunk with object choices replaces", chunk(stop, `{"prompt_tokens":9,"completion_tokens":5}`) + chunk(`{}`, `{"prompt_tokens":23,"completion_tokens":7}`) + "data: [DONE]\n\n", "23/0/null/7/null", outcomeComplete},
+		{"later chunk with numeric choices replaces", chunk(stop, `{"prompt_tokens":9,"completion_tokens":5}`) + chunk(`5`, `{"prompt_tokens":24,"completion_tokens":7}`) + "data: [DONE]\n\n", "24/0/null/7/null", outcomeComplete},
+		{"later malformed usage replaces with null", chunk(stop, `{"prompt_tokens":9,"completion_tokens":5}`) + `data: {"usage":{"prompt_tokens":1.5,"completion_tokens":7}}` + "\n\ndata: [DONE]\n\n", "null", outcomeComplete},
+		{"usage with choices absent does not publish first", `data: {"usage":{"prompt_tokens":21,"completion_tokens":7}}` + "\n\ndata: [DONE]\n\n", "null", outcomeComplete},
+		{"later null usage keeps published usage", chunk(stop, `{"prompt_tokens":9,"completion_tokens":5}`) + chunk(`[]`, `null`) + "data: [DONE]\n\n", "9/0/null/5/null", outcomeComplete},
 		{"non-string finish reason", chunk(`[{"index":0,"finish_reason":1}]`, `{"prompt_tokens":9,"completion_tokens":5}`) + "data: [DONE]\n\n", "null", outcomeComplete},
 		{"usage without finish reason", chunk(`[{"index":0,"finish_reason":null}]`, `{"prompt_tokens":9,"completion_tokens":5}`) + "data: [DONE]\n\n", "null", outcomeComplete},
 	} {
@@ -476,9 +518,72 @@ func TestStrictJSON(t *testing.T) {
 		{`{"model":"claude-a","prompt_cache_key":"session-0001",}`, "", ""},
 		{`{"model":"claude-a"} {"x":1}`, "", ""},
 	} {
-		o := testJournal(t).begin(requestFor("/v1/responses", c.body), testStart)
-		if deref(o.model) != c.model || deref(o.session) != c.session {
-			t.Errorf("%s: model %q session %q", c.body, deref(o.model), deref(o.session))
+		rec, _ := finish(testJournal(t).begin(requestFor("/v1/responses", c.body), testStart), EndEOF, at(100))
+		if deref(rec.RequestedModel) != c.model || deref(rec.ClientSession) != c.session {
+			t.Errorf("%s: model %q session %q", c.body, deref(rec.RequestedModel), deref(rec.ClientSession))
 		}
+	}
+}
+
+func TestOnlyTheFirstTraceHeaderCounts(t *testing.T) {
+	other := "20261111100001-fedcba9876543210-019a7140-0000-7000-8000-000000000009"
+	for _, c := range []struct {
+		name, headers, trace, executionID string
+		seat                              bool
+	}{
+		{"valid then different valid", "X-CPA-TRACE-ID: " + testTrace + "\r\nx-cpa-trace-id: " + other + "\r\n", testTrace, "019a7140-0000-7000-8000-000000000001", true},
+		{"malformed then valid", "X-CPA-TRACE-ID: not-a-trace\r\nX-CPA-TRACE-ID: " + other + "\r\n", "not-a-trace", "", false},
+		{"empty then valid", "X-CPA-TRACE-ID:\r\nX-CPA-TRACE-ID: " + other + "\r\n", "", "", false},
+		{"blank then valid", "X-CPA-TRACE-ID: \t \r\nX-CPA-TRACE-ID: " + other + "\r\n", "", "", false},
+		{"bad index then valid", "X-CPA-TRACE-ID: 20261111100000-XYZ-019a7140-0000-7000-8000-000000000003\r\nX-CPA-TRACE-ID: " + other + "\r\n",
+			"20261111100000-XYZ-019a7140-0000-7000-8000-000000000003", "019a7140-0000-7000-8000-000000000003", false},
+	} {
+		rec := observeEverySplit(t, messagesRequest, jsonResponse(c.headers, anthropicMessage), EndEOF)
+		if deref(rec.TraceID) != c.trace || (rec.TraceID == nil) != (c.trace == "") || (rec.Seat != nil) != c.seat {
+			t.Errorf("%s: trace %q seat %+v", c.name, deref(rec.TraceID), rec.Seat)
+		}
+		if c.executionID == "" {
+			if !uuidV4Pattern.MatchString(rec.ExecutionID) {
+				t.Errorf("%s: execution_id %s is not minted", c.name, rec.ExecutionID)
+			}
+		} else if rec.ExecutionID != c.executionID {
+			t.Errorf("%s: execution_id %s, want %s", c.name, rec.ExecutionID, c.executionID)
+		}
+	}
+}
+
+// nested wraps value in depth-1 arrays. As a member of a top-level object,
+// a scalar value then sits depth levels deep.
+func nested(depth int, value string) string {
+	return strings.Repeat("[", depth-1) + value + strings.Repeat("]", depth-1)
+}
+
+func TestJSONNestingLimit(t *testing.T) {
+	for _, c := range []struct {
+		depth int
+		ok    bool
+	}{{512, true}, {513, false}} {
+		body := `{"model":"claude-haiku-4-5-20251001","prompt_cache_key":"session-0001","pad":` + nested(c.depth, "0") + `}`
+		rec := observeEverySplit(t, requestFor("/v1/messages", body), jsonResponse("", anthropicMessage), EndEOF)
+		if (rec.RequestedModel != nil) != c.ok || (rec.ClientSession != nil) != c.ok || rec.Provider != "claude" {
+			t.Errorf("request nested %d deep: model %q session %q provider %s", c.depth, deref(rec.RequestedModel), deref(rec.ClientSession), rec.Provider)
+		}
+
+		message := `{"type":"message","model":"m","usage":{"input_tokens":10,"output_tokens":4},"pad":` + nested(c.depth, "0") + `}`
+		rec = observeEverySplit(t, messagesRequest, jsonResponse("", message), EndEOF)
+		if (rec.Tokens != nil) != c.ok || (rec.ResponseModel != nil) != c.ok || rec.Outcome != outcomeComplete {
+			t.Errorf("response nested %d deep: tokens %s model %q outcome %s", c.depth, tokensString(rec.Tokens), deref(rec.ResponseModel), rec.Outcome)
+		}
+
+		chunk := `data: {"object":"chat.completion.chunk","model":"m","choices":[],"usage":{"prompt_tokens":9,"completion_tokens":5},"pad":` + nested(c.depth-1, `{}`) + "}\n\n"
+		rec = observeEverySplit(t, chatRequest, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"+chunk+"data: [DONE]\n\n", EndEOF)
+		if (rec.Tokens != nil) != c.ok || rec.Outcome != outcomeComplete {
+			t.Errorf("SSE payload nested %d deep: tokens %s outcome %s", c.depth, tokensString(rec.Tokens), rec.Outcome)
+		}
+	}
+	// Brackets inside strings do not count as nesting.
+	body := `{"model":"claude-haiku-4-5-20251001","pad":"` + strings.Repeat("[{", 600) + `\"]"}`
+	if rec := observeEverySplit(t, requestFor("/v1/messages", body), jsonResponse("", anthropicMessage), EndEOF); rec.RequestedModel == nil {
+		t.Error("brackets inside a string counted as nesting")
 	}
 }

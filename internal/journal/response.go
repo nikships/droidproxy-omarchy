@@ -74,6 +74,7 @@ type response struct {
 	headDone  bool
 	status    int
 	trace     string
+	traceSeen bool
 
 	contentLength   int64
 	hasLength       bool
@@ -148,19 +149,12 @@ func (r *response) learnHead(p []byte) (traceNow bool) {
 }
 
 // feedHead consumes head bytes line by line. Lines end in CRLF; the head
-// ends at an empty line. Each head may be at most maxHeadBytes long,
-// counted from its first byte.
+// ends at an empty line. A head that reaches maxHeadBytes, counted from its
+// first byte, without its terminator is over the cap at that byte.
 func (r *response) feedHead(p []byte, learn bool) (n int, traceNow bool) {
 	for n < len(p) {
-		room := maxHeadBytes - r.headBytes
-		if room <= 0 {
-			if !learn {
-				r.malformed = true
-			}
-			return n, traceNow
-		}
 		chunk := p[n:]
-		if len(chunk) > room {
+		if room := maxHeadBytes - r.headBytes; len(chunk) > room {
 			chunk = chunk[:room]
 		}
 		i := bytes.IndexByte(chunk, '\n')
@@ -168,18 +162,23 @@ func (r *response) feedHead(p []byte, learn bool) (n int, traceNow bool) {
 			r.line = append(r.line, chunk...)
 			r.headBytes += len(chunk)
 			n += len(chunk)
-			continue
+		} else {
+			r.line = append(r.line, chunk[:i+1]...)
+			r.headBytes += i + 1
+			n += i + 1
+			if !bytes.HasSuffix(r.line, []byte("\r\n")) {
+				r.malformed = r.malformed || !learn
+				return n, traceNow
+			}
+			ok, t := r.headLine(r.line[:len(r.line)-2], learn)
+			r.line = r.line[:0]
+			traceNow = traceNow || t
+			if !ok || r.headDone {
+				return n, traceNow
+			}
 		}
-		r.line = append(r.line, chunk[:i+1]...)
-		r.headBytes += i + 1
-		n += i + 1
-		if !bytes.HasSuffix(r.line, []byte("\r\n")) {
-			continue
-		}
-		ok, t := r.headLine(r.line[:len(r.line)-2], learn)
-		r.line = r.line[:0]
-		traceNow = traceNow || t
-		if !ok || r.headDone {
+		if r.headBytes >= maxHeadBytes {
+			r.malformed = r.malformed || !learn
 			return n, traceNow
 		}
 	}
@@ -222,11 +221,11 @@ func (r *response) headLine(line []byte, learn bool) (ok, traceNow bool) {
 		return true, false
 	}
 	if strings.EqualFold(name, "X-CPA-TRACE-ID") {
-		if r.trace == "" && value != "" {
-			r.trace = value
-			return true, true
+		if r.traceSeen {
+			return true, false
 		}
-		return true, false
+		r.traceSeen, r.trace = true, value
+		return true, value != ""
 	}
 	if learn {
 		return true, false
@@ -384,8 +383,13 @@ func (r *response) feedChunked(p []byte) {
 			line, crlf := bytes.CutSuffix(r.line, []byte("\r"))
 			if r.chunk == chunkTrailer {
 				ended := len(line) == 0
+				_, _, valid := splitHeader(line)
 				r.line = r.line[:0]
-				if ended {
+				switch {
+				case !crlf || (!ended && !valid):
+					r.malformed = true
+					return
+				case ended:
 					r.framingEnded()
 					return
 				}
@@ -407,10 +411,12 @@ func (r *response) feedChunked(p []byte) {
 	}
 }
 
+// parseChunkSize reads a chunk-size line without its CRLF: one or more hex
+// digits, then optionally ";" and an extension. A size too large for int64
+// is malformed.
 func parseChunkSize(line string) (int64, bool) {
 	size, _, _ := strings.Cut(line, ";")
-	size = trimOWS(size)
-	if size == "" || len(size) > 15 {
+	if size == "" {
 		return 0, false
 	}
 	for i := 0; i < len(size); i++ {
@@ -612,9 +618,13 @@ func (r *response) mergeAnthropicUsage(usage map[string]json.RawMessage, carries
 
 // chatChunk publishes chat/text completions usage from a chunk that has a
 // non-null string finish_reason or empty choices; once published, any later
-// chunk with usage replaces it.
+// chunk with non-null usage replaces it, whatever its choices.
 func (r *response) chatChunk(obj map[string]json.RawMessage) {
 	if !isPresent(obj["usage"]) {
+		return
+	}
+	if r.chatPublished {
+		r.tokens = chatTokens(obj["usage"])
 		return
 	}
 	raw := obj["choices"]
@@ -628,7 +638,7 @@ func (r *response) chatChunk(obj map[string]json.RawMessage) {
 			qualifies = true
 		}
 	}
-	if qualifies || r.chatPublished {
+	if qualifies {
 		r.tokens = chatTokens(obj["usage"])
 		r.chatPublished = true
 	}
@@ -648,14 +658,41 @@ func (r *response) noteModel(obj map[string]json.RawMessage) {
 	}
 }
 
-// strictObject parses data as one strict JSON object. Repeated members keep
-// their last value.
+// maxJSONDepth is the deepest nesting of arrays and objects the journal
+// accepts as strict JSON; the outermost value is depth 1.
+const maxJSONDepth = 512
+
+// strictObject parses data as one strict JSON object nested at most
+// maxJSONDepth deep. Repeated members keep their last value.
 func strictObject(data []byte) map[string]json.RawMessage {
 	var obj map[string]json.RawMessage
-	if json.Unmarshal(data, &obj) != nil {
+	if !nestedWithin(data, maxJSONDepth) || json.Unmarshal(data, &obj) != nil {
 		return nil
 	}
 	return obj
+}
+
+// nestedWithin reports whether arrays and objects in data, outside strings,
+// nest at most limit deep. It does not validate data.
+func nestedWithin(data []byte, limit int) bool {
+	depth := 0
+	for i := 0; i < len(data); i++ {
+		switch data[i] {
+		case '"':
+			for i++; i < len(data) && data[i] != '"'; i++ {
+				if data[i] == '\\' {
+					i++
+				}
+			}
+		case '{', '[':
+			if depth++; depth > limit {
+				return false
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return true
 }
 
 func isPresent(raw json.RawMessage) bool {

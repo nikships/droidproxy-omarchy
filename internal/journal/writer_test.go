@@ -48,7 +48,7 @@ func TestWriterAppendsToPrivateMonthFile(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "journal")
 	w := newRecordWriter(dir, 8)
 	rec := testRecord("2026-11-30T23:59:59.999Z", "claude-haiku-4-5-20251001")
-	w.enqueue(rec)
+	w.enqueue(queued(rec))
 	w.close()
 
 	path := filepath.Join(dir, "requests-2026-11.jsonl")
@@ -80,8 +80,8 @@ func TestWriterRefusesSymlinkAndNonRegularFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := newRecordWriter(dir, 8)
-	w.enqueue(testRecord("2026-11-11T10:00:00.000Z", ""))
-	w.enqueue(testRecord("2026-12-11T10:00:00.000Z", ""))
+	w.enqueue(queued(testRecord("2026-11-11T10:00:00.000Z", "")))
+	w.enqueue(queued(testRecord("2026-12-11T10:00:00.000Z", "")))
 	w.close()
 	if data, _ := os.ReadFile(target); len(data) != 0 {
 		t.Fatalf("wrote through a symlink: %q", data)
@@ -102,7 +102,7 @@ func TestWriterRepairsTornTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := testRecord("2026-11-11T10:00:00.000Z", "")
-	if err := appendLine(dir, "2026-11", mustLine(t, rec)); err != nil {
+	if _, err := appendLine(dir, "2026-11", mustLine(t, rec)); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := string(mustRead(t, path)), complete+string(mustLine(t, rec)); got != want {
@@ -112,7 +112,7 @@ func TestWriterRepairsTornTail(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"only":"torn`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := appendLine(dir, "2026-11", mustLine(t, rec)); err != nil {
+	if _, err := appendLine(dir, "2026-11", mustLine(t, rec)); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(mustRead(t, path)); got != string(mustLine(t, rec)) {
@@ -133,7 +133,7 @@ func TestConcurrentWritersNeverInterleave(t *testing.T) {
 			defer wg.Done()
 			writer := newRecordWriter(dir, perWriter)
 			for i := 0; i < perWriter; i++ {
-				writer.enqueue(testRecord("2026-11-11T10:00:00.000Z", big+string(rune('a'+w))))
+				writer.enqueue(queued(testRecord("2026-11-11T10:00:00.000Z", big+string(rune('a'+w)))))
 			}
 			writer.close()
 		}(w)
@@ -180,7 +180,7 @@ func TestWriterQueueOverflowDropsWithoutBlocking(t *testing.T) {
 
 	w := newRecordWriter(dir, 2)
 	rec := testRecord("2026-11-11T10:00:00.000Z", "")
-	w.enqueue(rec)
+	w.enqueue(queued(rec))
 	deadline := time.Now().Add(5 * time.Second)
 	for len(w.queue) != 0 {
 		if time.Now().After(deadline) {
@@ -190,7 +190,7 @@ func TestWriterQueueOverflowDropsWithoutBlocking(t *testing.T) {
 	}
 	start := time.Now()
 	for i := 0; i < 7; i++ {
-		w.enqueue(rec)
+		w.enqueue(queued(rec))
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("enqueue blocked for %v", elapsed)
@@ -206,11 +206,15 @@ func TestWriterQueueOverflowDropsWithoutBlocking(t *testing.T) {
 	if lines := readLines(t, path); len(lines) != 3 {
 		t.Fatalf("%d lines written, want 3", len(lines))
 	}
-	w.enqueue(rec)
+	w.enqueue(queued(rec))
 	if w.dropped.Load() != 6 {
 		t.Fatalf("enqueue after Close was not dropped")
 	}
 }
+
+// queued is rec as the writer receives it from a finalized observation
+// whose request fields are already known.
+func queued(rec Record) pending { return pending{rec: rec} }
 
 func mustLine(t *testing.T, rec Record) []byte {
 	t.Helper()
@@ -259,7 +263,7 @@ func TestWriterCloseDoesNotWaitOnAHeldLock(t *testing.T) {
 
 	w := newRecordWriter(dir, 16)
 	for i := 0; i < 8; i++ {
-		w.enqueue(testRecord("2026-11-11T10:00:00.000Z", ""))
+		w.enqueue(queued(testRecord("2026-11-11T10:00:00.000Z", "")))
 	}
 	start := time.Now()
 	closed := make(chan struct{})

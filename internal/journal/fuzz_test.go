@@ -4,18 +4,25 @@ import (
 	"testing"
 )
 
+// maxFuzzWire bounds fuzz inputs so each execution, which replays the bytes
+// three ways, stays fast enough for the fuzzer to explore.
+const maxFuzzWire = 4 << 10
+
 // FuzzObserverSplits relays arbitrary response bytes and requires a
 // schema-valid record that does not depend on how the bytes were split
 // across reads, and that a failed client write never panics.
 func FuzzObserverSplits(f *testing.F) {
 	for _, c := range loadTranscripts(f) {
-		if len(c.Response) <= 8<<10 {
-			f.Add(latin1(f, c.Response), uint16(len(c.Response)/2))
+		if wire := latin1(f, c.Response); len(wire) <= maxFuzzWire {
+			f.Add(wire, uint16(len(wire)/2))
 		}
 	}
 	schema := loadSchema(f)
+	j := testJournal(f)
 	f.Fuzz(func(t *testing.T, wire []byte, k uint16) {
-		j := testJournal(t)
+		if len(wire) > maxFuzzWire {
+			return
+		}
 		whole := observeReads(j, chatRequest, [][]byte{wire}, EndEOF)
 		if err := schema.validateRecord(recordObject(t, whole)); err != nil {
 			t.Fatalf("record fails the schema: %v\n%s", err, comparable(whole))

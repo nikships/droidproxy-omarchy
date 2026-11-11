@@ -68,8 +68,6 @@ func (j *Journal) Begin(ctx RequestContext) *Observation {
 
 func (j *Journal) begin(ctx RequestContext, now time.Time) *Observation {
 	headers := parseHeaderLines(ctx.Head)
-	body := strictObject([]byte(ctx.Body))
-
 	o := &Observation{
 		journal:  j,
 		started:  now,
@@ -84,13 +82,7 @@ func (j *Journal) begin(ctx RequestContext, now time.Time) *Observation {
 	if isPrimer(headers) {
 		o.origin = "primer"
 	}
-	o.model = requestedModel(o.endpoint, body)
-	model := ""
-	if o.model != nil {
-		model = *o.model
-	}
-	o.provider = deriveProvider(model, o.endpoint)
-	o.session = clientSession(headers, body)
+	o.request = readRequest(o.endpoint, headers, ctx.Body)
 	return o
 }
 
@@ -106,9 +98,7 @@ type Observation struct {
 	endpoint  string
 	forwarded *string
 	origin    string
-	provider  string
-	model     *string
-	session   *string
+	request   *requestFacts
 
 	resp response
 
@@ -125,8 +115,8 @@ func (o *Observation) Delivered(p []byte, readAt time.Time) {
 	if o == nil {
 		return
 	}
-	if rec, ok := o.deliverAt(p, readAt, time.Now()); ok {
-		o.journal.writer.enqueue(rec)
+	if fin, ok := o.deliverAt(p, readAt, time.Now()); ok {
+		o.journal.writer.enqueue(fin)
 	}
 }
 
@@ -136,8 +126,8 @@ func (o *Observation) WriteFailed(p []byte, accepted int, readAt time.Time) {
 	if o == nil {
 		return
 	}
-	if rec, ok := o.writeFailedAt(p, accepted, readAt, time.Now()); ok {
-		o.journal.writer.enqueue(rec)
+	if fin, ok := o.writeFailedAt(p, accepted, readAt, time.Now()); ok {
+		o.journal.writer.enqueue(fin)
 	}
 }
 
@@ -146,25 +136,25 @@ func (o *Observation) Finish(end End) {
 	if o == nil {
 		return
 	}
-	if rec, ok := o.finishAt(end, time.Now()); ok {
-		o.journal.writer.enqueue(rec)
+	if fin, ok := o.finishAt(end, time.Now()); ok {
+		o.journal.writer.enqueue(fin)
 	}
 }
 
-func (o *Observation) deliverAt(p []byte, readAt, writeAt time.Time) (Record, bool) {
+func (o *Observation) deliverAt(p []byte, readAt, writeAt time.Time) (pending, bool) {
 	if o.finished {
-		return Record{}, false
+		return pending{}, false
 	}
 	o.observe(p, readAt, writeAt)
 	if o.resp.settled() {
 		return o.finishAt(endSettled, writeAt)
 	}
-	return Record{}, false
+	return pending{}, false
 }
 
-func (o *Observation) writeFailedAt(p []byte, accepted int, readAt, now time.Time) (Record, bool) {
+func (o *Observation) writeFailedAt(p []byte, accepted int, readAt, now time.Time) (pending, bool) {
 	if o.finished {
-		return Record{}, false
+		return pending{}, false
 	}
 	accepted = min(max(accepted, 0), len(p))
 	o.observe(p[:accepted], readAt, now)
@@ -193,9 +183,11 @@ func (o *Observation) noteTrace(now time.Time) {
 	}
 }
 
-func (o *Observation) finishAt(end End, now time.Time) (Record, bool) {
+// finishAt finalizes the observation. The request fields of its record are
+// filled in later, off the relay, by pending.record.
+func (o *Observation) finishAt(end End, now time.Time) (pending, bool) {
 	if o.finished {
-		return Record{}, false
+		return pending{}, false
 	}
 	o.finished = true
 	r := &o.resp
@@ -235,10 +227,7 @@ func (o *Observation) finishAt(end End, now time.Time) (Record, bool) {
 		Origin:            o.origin,
 		Endpoint:          o.endpoint,
 		ForwardedEndpoint: o.forwarded,
-		Provider:          o.provider,
-		RequestedModel:    o.model,
 		Outcome:           outcome,
-		ClientSession:     o.session,
 		Tokens:            r.tokens,
 	}
 	if rec.ExecutionID == "" {
@@ -269,5 +258,23 @@ func (o *Observation) finishAt(end End, now time.Time) (Record, bool) {
 		}
 		rec.Seat = seat
 	}
-	return rec, true
+	return pending{rec: rec, request: o.request}, true
+}
+
+// pending is a finalized record still waiting for its request fields.
+type pending struct {
+	rec     Record
+	request *requestFacts
+}
+
+// record waits for the request body to be parsed and returns the complete
+// record.
+func (p pending) record() Record {
+	if p.request != nil {
+		<-p.request.done
+		p.rec.RequestedModel = p.request.model
+		p.rec.Provider = p.request.provider
+		p.rec.ClientSession = p.request.session
+	}
+	return p.rec
 }

@@ -236,7 +236,7 @@ func replay(t *testing.T, j *Journal, c transcriptCase, chunks [][]byte) Record 
 		keep(deliver(o, chunk, readAt, writeAt))
 		offset += len(chunk)
 	}
-	keep(o.finishAt(EndEOF, endAt))
+	keep(finish(o, EndEOF, endAt))
 	if !done {
 		t.Fatal("observation did not finalize")
 	}
@@ -342,12 +342,12 @@ func TestGoldenExitPaths(t *testing.T) {
 
 	t.Run("backend_unreachable_502", func(t *testing.T) {
 		o := contractJournal(t, nil).begin(messages, start)
-		rec, _ := o.finishAt(EndBackendUnreachable, at(3))
+		rec, _ := finish(o, EndBackendUnreachable, at(3))
 		check(t, schema, "backend_unreachable_502", rec, true)
 	})
 	t.Run("upstream_error_before_status", func(t *testing.T) {
 		o := contractJournal(t, nil).begin(messages, start)
-		rec, _ := o.finishAt(EndSendFailed, at(100))
+		rec, _ := finish(o, EndSendFailed, at(100))
 		check(t, schema, "upstream_error_before_status", rec, true)
 	})
 	t.Run("client_disconnected_before_terminal_usage", func(t *testing.T) {
@@ -373,7 +373,7 @@ func TestGoldenExitPaths(t *testing.T) {
 		o := contractJournal(t, nil).begin(ctx, start)
 		rec, ok := deliver(o, []byte(wire), at(20), at(100))
 		if !ok {
-			rec, _ = o.finishAt(EndEOF, at(100))
+			rec, _ = finish(o, EndEOF, at(100))
 		}
 		check(t, schema, "gemini_path_rewrite", rec, true)
 	})
