@@ -178,10 +178,14 @@ func transcriptContext(t *testing.T, c transcriptCase) RequestContext {
 		}
 		body = string(data)
 	}
+	forwarded := c.Request.Endpoint
+	if f, ok := decodeObject(t, c.Expect)["forwarded_endpoint"].(string); ok {
+		forwarded = f
+	}
 	return RequestContext{
 		Method:        c.Request.Method,
 		Path:          c.Request.Endpoint,
-		ForwardedPath: c.Request.Endpoint,
+		ForwardedPath: forwarded,
 		Head:          head.String(),
 		Body:          body,
 	}

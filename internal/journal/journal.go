@@ -79,6 +79,7 @@ func (j *Journal) begin(ctx RequestContext, now time.Time) *Observation {
 		o.forwarded = ptr(forwarded)
 	}
 	o.resp.envelope = envelopeFor(forwarded)
+	o.resp.sseFamily = sseFamilyFor(forwarded)
 	if isPrimer(headers) {
 		o.origin = "primer"
 	}

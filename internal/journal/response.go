@@ -60,10 +60,25 @@ func envelopeFor(forwardedPath string) envelope {
 	return envelopeNone
 }
 
+// sseFamilyFor is the family whose terminal SSE usage counts for the path
+// forwarded to CLIProxyAPI. Compact paths stream Responses events but have
+// no recognized non-stream envelope, and text completions stream the chat
+// chunk shape.
+func sseFamilyFor(forwardedPath string) envelope {
+	switch forwardedPath {
+	case "/v1/responses/compact", "/backend-api/codex/responses/compact":
+		return envelopeResponses
+	case "/v1/completions":
+		return envelopeChat
+	}
+	return envelopeFor(forwardedPath)
+}
+
 // response follows the bytes the client received from CLIProxyAPI: HTTP
 // head, entity framing, and the SSE or JSON body that carries usage.
 type response struct {
-	envelope envelope
+	envelope  envelope
+	sseFamily envelope
 
 	// line holds a partial head line, chunk-size or trailer line, or the
 	// CRLF expected after chunk data.
@@ -586,7 +601,9 @@ func (r *response) sseDispatch() {
 	case "message_stop":
 		r.completed = true
 	case "response.completed", "response.incomplete":
-		r.tokens = responsesTokens(objectOf(obj["response"])["usage"])
+		if r.sseFamily == envelopeResponses {
+			r.tokens = responsesTokens(objectOf(obj["response"])["usage"])
+		}
 		r.completed = true
 	default:
 		if !hasType && isPresent(obj["error"]) {
@@ -601,7 +618,7 @@ func (r *response) sseDispatch() {
 // replacing earlier ones. Once a message_delta has carried output_tokens,
 // every merge re-normalizes the terminal usage.
 func (r *response) mergeAnthropicUsage(usage map[string]json.RawMessage, carriesOutput bool) {
-	if usage == nil {
+	if usage == nil || r.sseFamily != envelopeAnthropic {
 		return
 	}
 	if r.anthropicUsage == nil {
@@ -620,7 +637,7 @@ func (r *response) mergeAnthropicUsage(usage map[string]json.RawMessage, carries
 // non-null string finish_reason or empty choices; once published, any later
 // chunk with non-null usage replaces it, whatever its choices.
 func (r *response) chatChunk(obj map[string]json.RawMessage) {
-	if !isPresent(obj["usage"]) {
+	if r.sseFamily != envelopeChat || !isPresent(obj["usage"]) {
 		return
 	}
 	if r.chatPublished {

@@ -475,6 +475,58 @@ func TestNonStreamEnvelopeFollowsForwardedPath(t *testing.T) {
 	}
 }
 
+func TestSSEUsageFollowsForwardedPath(t *testing.T) {
+	sse := func(events ...string) string {
+		return "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" + strings.Join(events, "")
+	}
+	anthropic := sse(
+		`data: {"type":"message_start","message":{"model":"m","usage":{"input_tokens":10,"output_tokens":1}}}`+"\n\n",
+		`data: {"type":"message_delta","usage":{"output_tokens":4}}`+"\n\n",
+		`data: {"type":"message_stop"}`+"\n\n")
+	responses := sse(`data: {"type":"response.completed","response":{"model":"m","usage":{"input_tokens":7,"output_tokens":1}}}` + "\n\n")
+	chat := sse(`data: {"object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":5}}`+"\n\n",
+		"data: [DONE]\n\n")
+	const (
+		anthropicTokens = "10/0/0/4/null"
+		responsesTokens = "7/0/null/1/null"
+		chatTokens      = "9/0/null/5/null"
+	)
+	for _, c := range []struct {
+		forwarded, accepted string
+	}{
+		{"/v1/messages", anthropicTokens},
+		{"/v1/chat/completions", chatTokens},
+		{"/v1/chat/completions?x=1", chatTokens},
+		{"/v1/completions", chatTokens},
+		{"/v1/responses", responsesTokens},
+		{"/backend-api/codex/responses", responsesTokens},
+		{"/v1/responses/compact", responsesTokens},
+		{"/backend-api/codex/responses/compact", responsesTokens},
+		{"/v1beta/models/gemini-x:streamGenerateContent", ""},
+		{"/v1beta/interactions", ""},
+		{"/v1/alpha/search", ""},
+		{"/v1/images/generations", ""},
+		{"/v1/realtime", ""},
+	} {
+		for _, s := range []struct{ wire, tokens string }{
+			{anthropic, anthropicTokens},
+			{responses, responsesTokens},
+			{chat, chatTokens},
+		} {
+			want := "null"
+			if s.tokens == c.accepted {
+				want = s.tokens
+			}
+			ctx := requestFor("/v1/responses", `{"model":"x"}`)
+			ctx.ForwardedPath = c.forwarded
+			rec := observeEverySplit(t, ctx, s.wire, EndEOF)
+			if tokensString(rec.Tokens) != want || rec.Outcome != outcomeComplete || deref(rec.ResponseModel) != "m" {
+				t.Errorf("%s with %s stream: tokens %s outcome %s model %q, want %s", c.forwarded, s.tokens, tokensString(rec.Tokens), rec.Outcome, deref(rec.ResponseModel), want)
+			}
+		}
+	}
+}
+
 func TestTransferAndContentCodings(t *testing.T) {
 	for _, c := range []struct {
 		name, head, body, outcome, tokens string

@@ -247,13 +247,23 @@ include cached tokens, so a larger cached count is malformed. This rule does not
 apply to Anthropic: its `input_tokens` already excludes cache reads and
 creations, so `cache_read_input_tokens` may exceed it and the usage is valid.
 
+SSE usage is read only from terminal usage of the family of the path forwarded
+to CLIProxyAPI (the original path unless it was rewritten, query stripped).
+`/v1/messages` takes Anthropic SSE only. `/v1/chat/completions` and
+`/v1/completions` take chat/text completions SSE only. `/v1/responses`,
+`/backend-api/codex/responses`, `/v1/responses/compact`, and
+`/backend-api/codex/responses/compact` take Responses SSE only. Terminal usage
+of another family gives tokens null, and so does SSE usage on every other
+admitted path. The family does not affect outcome, completion, protocol errors,
+or `response_model`.
+
 | Format | Terminal usage |
 | --- | --- |
 | Anthropic SSE | Usage objects from `message_start.message.usage` and from every `message_delta.usage` merge field by field; later values replace earlier ones and are never summed. Terminal usage exists once any message_delta has carried `output_tokens`. After that it is re-normalized on every later usage update, and the record keeps the latest merged state. A message_start alone is not terminal usage. `message_stop` is the stream terminator. |
 | Responses SSE | Use `response.usage` only in `response.completed` or `response.incomplete`, both terminal. Incomplete is a completed protocol exchange, not premature EOF. Never use a partial response.created usage. |
 | Chat/text completions SSE | A chunk with non-null `usage` that also has a `finish_reason`, or has an empty `choices` array, publishes terminal usage immediately; a later chunk with non-null `usage` replaces it. A finish reason qualifies only when at least one choices entry has a non-null string `finish_reason`; a present null does not qualify. `[DONE]` or HTTP framing completion (not EOF of a close-delimited SSE body) is still required for outcome complete, and terminal usage already published is kept if the stream is later truncated. finish_reason alone does not end the stream. Without usage, tokens are null. |
 | Non-stream JSON | Usage is read only from a fully framed, decoded body whose envelope matches the family of the path forwarded to CLIProxyAPI (the original path unless it was rewritten): Anthropic `type: "message"`; Responses `object: "response"`; chat completions `object: "chat.completion"`; text completions `object: "text_completion"`. Any other body gives tokens null; `response_model` is still read from it. A recognized envelope without usage also gives null. |
-| Other formats | v1 does not normalize native Gemini, interactions, media, search, compact-specific, or live-session usage. Their non-stream bodies have no recognized envelope, so tokens are null; an SSE stream on these paths gives tokens only if it carries one of the text-format terminal usage shapes above. |
+| Other formats | v1 does not normalize native Gemini, interactions, media, search, or live-session usage. Their non-stream bodies have no recognized envelope and their SSE usage is not read, so tokens are null even when a stream carries one of the shapes above. A compact non-stream body has no recognized envelope either, so its tokens are null. |
 
 Anthropic: `input_uncached = input_tokens`, `cache_read =
 cache_read_input_tokens`, `cache_creation = cache_creation_input_tokens`,
@@ -430,7 +440,8 @@ full expected record.
   `model`, `prompt_cache_key`, and `metadata.user_id`; send it serialized as
   JSON. `body_raw` is the exact request body text, for bodies that are not
   strict JSON or repeat a member; send it as its UTF-8 bytes with nothing
-  added.
+  added. The request is forwarded on `endpoint` unless the expected record's
+  `forwarded_endpoint` is not null, in which case it is forwarded on that path.
 - `observation` gives the clock. Elapsed time 0 is `started_at`. Every upstream
   read returns at `first_body_elapsed_ms`. Every client write completes at the
   elapsed time of `ended_at`. The end signal arrives at `end_signal_elapsed_ms`
@@ -485,7 +496,8 @@ envelopes, non-strict request and response JSON, repeated request members,
 response-model location order, out-of-range status codes, close-delimited SSE,
 event names without a completion payload, SSE lines at and one byte over the
 line cap, the chat cache-creation fallback and null finish reasons, bytes after
-`[DONE]`, and failed client writes.
+`[DONE]`, failed client writes, and SSE usage of a family other than the
+forwarded path's, including a forwarded path that differs from the original.
 Their provenance is recorded per case; they are not claimed as real captures.
 
 Each implementation tests these rules itself rather than through transcripts:
@@ -505,8 +517,8 @@ Each implementation tests these rules itself rather than through transcripts:
 
 ### Limits in v1
 
-- Non-text inference routes are admitted. Their usage is null except for
-  supported terminal text-format SSE usage described above.
+- Non-text inference routes are admitted. Their usage is null, even when a
+  stream carries a text-format usage shape.
 - The relay recognizes `/api/v1/responses`, but CLIProxyAPI v8.0.61 does not
   serve that path, so it is not admitted.
 - `complete` means delivered protocol completion or HTTP framing completion.

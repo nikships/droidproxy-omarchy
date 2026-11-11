@@ -179,6 +179,14 @@ func TestTranscriptFixtures(t *testing.T) {
 			"response_body_depth_513",
 			"head_exactly_64k_unterminated",
 			"trace_header_empty_then_valid",
+			"anthropic_sse_on_chat_completions",
+			"chat_sse_on_messages",
+			"anthropic_sse_on_responses",
+			"anthropic_sse_on_responses_compact",
+			"responses_sse_on_responses_compact",
+			"responses_sse_on_gemini_stream",
+			"forwarded_chat_sse_from_messages",
+			"forwarded_anthropic_sse_from_messages",
 		} {
 			if !seen[name] {
 				t.Errorf("required transcript %q is missing", name)
