@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nikships/droidproxy-omarchy/internal/journal"
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
 	"github.com/nikships/droidproxy-omarchy/internal/meta"
 	"github.com/nikships/droidproxy-omarchy/internal/prefs"
@@ -55,6 +56,8 @@ type Proxy struct {
 	// UsageEndpoint answers GET /droidproxy/usage locally; ok is false for
 	// every other path.
 	UsageEndpoint func(requestPath string) (status int, body []byte, ok bool)
+	// Journal records requests relayed to CLIProxyAPI; nil records nothing.
+	Journal *journal.Journal
 
 	mu       sync.Mutex
 	listener net.Listener

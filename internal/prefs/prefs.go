@@ -35,6 +35,7 @@ const (
 	KeyAutoInstallUpdates        = "autoInstallUpdates"
 	KeyLastUpdateCheck           = "lastUpdateCheck"
 	KeySkippedVersion            = "skippedVersion"
+	KeyRequestJournal            = "requestJournal"
 )
 
 const DefaultBindAddress = "127.0.0.1"
@@ -220,6 +221,7 @@ func SequentialAccountFailover() bool {
 }
 func AutoCheckUpdates() bool   { return Shared().Bool(KeyAutoCheckUpdates, true) }
 func AutoInstallUpdates() bool { return Shared().Bool(KeyAutoInstallUpdates, false) }
+func RequestJournal() bool     { return Shared().Bool(KeyRequestJournal, false) }
 
 // BindAddress is only honored when the beta flag is on. Empty or multi-line
 // values are rejected so they can't produce an invalid listener host or inject

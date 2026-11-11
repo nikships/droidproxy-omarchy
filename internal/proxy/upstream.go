@@ -9,14 +9,19 @@ import (
 	"time"
 
 	"github.com/nikships/droidproxy-omarchy/internal/grok"
+	"github.com/nikships/droidproxy-omarchy/internal/journal"
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
 	"github.com/nikships/droidproxy-omarchy/internal/meta"
 )
 
-func (p *Proxy) forwardRequest(method, path, version string, headers [][2]string, body string, client net.Conn) {
+// forwardRequest relays one request to CLIProxyAPI. obs is nil unless the
+// request journal observes this request.
+func (p *Proxy) forwardRequest(method, path, version string, headers [][2]string, body string, client net.Conn, obs *journal.Observation) {
+	defer obs.Finish(journal.EndCancelled)
 	target, err := p.dialBackend()
 	if err != nil {
 		logx.Logf("[ThinkingProxy] Target connection failed: %v", err)
+		obs.Finish(journal.EndBackendUnreachable)
 		sendError(client, 502, "Bad Gateway")
 		return
 	}
@@ -28,9 +33,12 @@ func (p *Proxy) forwardRequest(method, path, version string, headers [][2]string
 		"content-length": true, "host": true, "transfer-encoding": true,
 	}
 	for _, h := range headers {
-		if !excluded[strings.ToLower(h[0])] {
-			fmt.Fprintf(&b, "%s: %s\r\n", h[0], h[1])
+		name := strings.ToLower(h[0])
+		// Observed responses must arrive uncompressed so usage can be read.
+		if excluded[name] || (obs != nil && name == "accept-encoding") {
+			continue
 		}
+		fmt.Fprintf(&b, "%s: %s\r\n", h[0], h[1])
 	}
 	fmt.Fprintf(&b, "Host: %s:%d\r\n", p.targetHost(), p.targetPort())
 	b.WriteString("Connection: close\r\n")
@@ -39,9 +47,10 @@ func (p *Proxy) forwardRequest(method, path, version string, headers [][2]string
 
 	if _, err := io.WriteString(target, b.String()); err != nil {
 		logx.Logf("[ThinkingProxy] Send error: %v", err)
+		obs.Finish(journal.EndSendFailed)
 		return
 	}
-	streamProxy(target, client)
+	streamProxy(target, client, obs)
 }
 
 func (p *Proxy) forwardToGrok(method, path, version string, headers [][2]string, body, model string, client net.Conn) {
@@ -221,7 +230,7 @@ func (p *Proxy) relayUpstreamResponse(target, client net.Conn, label string, rew
 		p.accumulateAndRewriteGrokResponse(target, client, label)
 		return
 	}
-	streamProxy(target, client)
+	streamProxy(target, client, nil)
 }
 
 func (p *Proxy) accumulateAndRewriteGrokResponse(target, client net.Conn, label string) {
@@ -237,7 +246,7 @@ func (p *Proxy) accumulateAndRewriteGrokResponse(target, client net.Conn, label 
 					logx.Logf("[ThinkingProxy] Send %s response error: %v", label, werr)
 					return
 				}
-				streamProxy(target, client)
+				streamProxy(target, client, nil)
 				return
 			}
 		}
@@ -266,19 +275,27 @@ func (p *Proxy) sendRewrittenGrokResponse(raw []byte, client net.Conn, label str
 	}
 }
 
-func streamProxy(from, to net.Conn) {
+// streamProxy copies the response unchanged. obs sees each chunk after the
+// client write returned, with the bytes the client accepted.
+func streamProxy(from, to net.Conn, obs *journal.Observation) {
 	buf := make([]byte, readChunkSize)
 	for {
 		n, err := from.Read(buf)
+		readAt := time.Now()
 		if n > 0 {
-			if _, werr := to.Write(buf[:n]); werr != nil {
+			if written, werr := to.Write(buf[:n]); werr != nil {
 				logx.Logf("[ThinkingProxy] Send response error: %v", werr)
+				obs.WriteFailed(buf[:n], written, readAt)
 				return
 			}
+			obs.Delivered(buf[:n], readAt)
 		}
 		if err != nil {
 			if err != io.EOF {
 				logx.Logf("[ThinkingProxy] Receive response error: %v", err)
+				obs.Finish(journal.EndReadError)
+			} else {
+				obs.Finish(journal.EndEOF)
 			}
 			return
 		}

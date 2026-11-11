@@ -64,6 +64,7 @@ type Settings struct {
 	WindowPrimerMinutesMeta   int    `json:"windowPrimerMinutes.meta"`
 	AutoCheckUpdates          bool   `json:"autoCheckUpdates"`
 	AutoInstallUpdates        bool   `json:"autoInstallUpdates"`
+	RequestJournal            bool   `json:"requestJournal"`
 }
 
 type PathsInfo struct {

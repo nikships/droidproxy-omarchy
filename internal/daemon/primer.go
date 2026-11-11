@@ -199,6 +199,7 @@ func sendPrimerThroughProxy(st auth.ServiceType) bool {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("anthropic-version", "2023-06-01")
+	request.Header.Set("X-DroidProxy-Origin", "window-primer")
 	response, err := primerClient.Do(request)
 	if err != nil {
 		logx.Logf("[WindowPrimer] %s request failed: %v", st, err)

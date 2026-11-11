@@ -318,6 +318,16 @@ func TestDaemonSettingsAndDesktopActions(t *testing.T) {
 		t.Error("verboseLogging did not persist")
 	}
 
+	if st, _ := client.State(); st.Settings.RequestJournal {
+		t.Error("requestJournal should default to off")
+	}
+	if res := callOK(t, client, "settings.set", map[string]any{"key": "requestJournal", "value": true}); !res.OK {
+		t.Fatalf("settings.set requestJournal = %+v", res)
+	}
+	if st, _ := client.State(); !st.Settings.RequestJournal {
+		t.Error("requestJournal did not persist")
+	}
+
 	if res := callOK(t, client, "settings.set", map[string]any{"key": "launchAtLogin", "value": false}); !res.OK {
 		t.Fatalf("settings.set launchAtLogin = %+v", res)
 	}
