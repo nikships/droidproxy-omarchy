@@ -7,13 +7,14 @@ import (
 	"strings"
 )
 
-// Observation limits. They bound memory only; the relay never waits on them.
+// Observation limits. They bound the memory and the inline CPU work of
+// observing one response; reaching one never stops or delays the relay.
 // maxChunkLineBytes is also a framing rule: a longer chunk-size or trailer
 // line, counting its CRLF, is malformed.
 const (
 	maxHeadBytes      = 64 << 10
 	maxChunkLineBytes = 64 << 10
-	maxSSELineBytes   = 256 << 10
+	maxSSELineBytes   = 2 << 20
 	maxSSEEventBytes  = 2 << 20
 	maxJSONBodyBytes  = 2 << 20
 )

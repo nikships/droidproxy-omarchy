@@ -446,6 +446,113 @@ func eventOfSize(n int, prompt int) string {
 	return "data: " + strings.Join(lines, "\ndata: ") + "\n\n"
 }
 
+// dataLine builds one SSE data line of exactly n bytes, not counting its
+// terminator: the JSON object payload with a one-string "pad" array added.
+// When closed is false the array and the object are left open for a later
+// data line to close.
+func dataLine(n int, space, closed bool, payload string) string {
+	prefix := "data:"
+	if space {
+		prefix = "data: "
+	}
+	head := prefix + payload[:len(payload)-1] + `,"pad":["`
+	tail := `"`
+	if closed {
+		tail = `"]}`
+	}
+	return head + strings.Repeat("p", n-len(head)-len(tail)) + tail
+}
+
+// capReads cuts wire whole, at two reads on each side of every boundary,
+// one byte per read across the boundaries, and in fixed-size reads.
+func capReads(wire []byte, boundaries ...int) map[string][][]byte {
+	patterns := map[string][][]byte{"whole": {wire}}
+	lo, hi := len(wire), 0
+	for _, b := range boundaries {
+		for k := b - 1; k <= b+2; k++ {
+			if k > 0 && k < len(wire) {
+				patterns[fmt.Sprintf("split %d", k)] = [][]byte{wire[:k], wire[k:]}
+				lo, hi = min(lo, k), max(hi, k)
+			}
+		}
+	}
+	bytewise := [][]byte{wire[:lo]}
+	for i := lo; i < hi; i++ {
+		bytewise = append(bytewise, wire[i:i+1])
+	}
+	patterns["bytewise around the boundaries"] = append(bytewise, wire[hi:])
+	for _, size := range []int{4093, 32 << 10} {
+		var reads [][]byte
+		for rest := wire; len(rest) > 0; rest = rest[min(size, len(rest)):] {
+			reads = append(reads, rest[:min(size, len(rest))])
+		}
+		patterns[fmt.Sprintf("reads of %d", size)] = reads
+	}
+	return patterns
+}
+
+// A data line's cap counts "data:" and any space before the value, while
+// the event-data cap counts only the assembled values, so a single data
+// line meets the line cap before its data can meet the event-data cap.
+func TestSSELineCap(t *testing.T) {
+	const lineCap, eventCap = 2 << 20, 2 << 20
+	usage := `{"object":"chat.completion.chunk","model":"inside-cap","choices":[],"usage":{"prompt_tokens":9,"completion_tokens":5}}`
+	untypedError := `{"error":{"message":"overlong"}}`
+	// The second line of a two-line event: assembled data is the first
+	// line's value, the LF between the lines, and this value.
+	closing := func(firstLine string, data int) string {
+		return "data:," + strings.Repeat("1", data-(len(firstLine)-len("data:"))-1-len(",]}")) + "]}"
+	}
+	atCap := dataLine(lineCap, false, false, usage)
+	head := "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+	// The later event carries no usage, so its model shows that scanning
+	// resumed without replacing usage.
+	later := `data: {"object":"chat.completion.chunk","model":"after-cap","choices":[{"index":0,"delta":{}}]}` + "\n\n"
+	for _, c := range []struct {
+		name                   string
+		event                  string
+		line, data             int
+		outcome, tokens, model string
+	}{
+		{"line at cap", dataLine(lineCap, true, true, usage) + "\n\n", lineCap, lineCap - 6, outcomeComplete, "9/0/null/5/null", "after-cap"},
+		{"line at cap ending in CRLF", dataLine(lineCap, true, true, usage) + "\r\n\r\n", lineCap, lineCap - 6, outcomeComplete, "9/0/null/5/null", "after-cap"},
+		{"line at cap without a space", dataLine(lineCap, false, true, usage) + "\n\n", lineCap, lineCap - 5, outcomeComplete, "9/0/null/5/null", "after-cap"},
+		{"line one over cap", dataLine(lineCap+1, true, true, usage) + "\n\n", lineCap + 1, lineCap - 5, outcomeComplete, "null", "after-cap"},
+		{"line one over cap ending in CRLF", dataLine(lineCap+1, true, true, usage) + "\r\n\r\n", lineCap + 1, lineCap - 5, outcomeComplete, "null", "after-cap"},
+		{"line one over cap without a space", dataLine(lineCap+1, false, true, usage) + "\n\n", lineCap + 1, lineCap - 4, outcomeComplete, "null", "after-cap"},
+		// An untyped top-level error is a protocol error only when its line
+		// is read.
+		{"error line at cap", dataLine(lineCap, true, true, untypedError) + "\n\n", lineCap, lineCap - 6, outcomeUpstreamError, "null", ""},
+		{"error line one over cap", dataLine(lineCap+1, true, true, untypedError) + "\n\n", lineCap + 1, lineCap - 5, outcomeComplete, "null", "after-cap"},
+		{"two lines with data at the event cap", atCap + "\n" + closing(atCap, eventCap) + "\n\n", lineCap, eventCap, outcomeComplete, "9/0/null/5/null", "after-cap"},
+		{"two lines with data one over the event cap", atCap + "\n" + closing(atCap, eventCap+1) + "\n\n", lineCap, eventCap + 1, outcomeComplete, "null", "after-cap"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			longest, data := 0, -1
+			for _, line := range strings.Split(strings.TrimRight(strings.ReplaceAll(c.event, "\r", ""), "\n"), "\n") {
+				longest = max(longest, len(line))
+				data += 1 + len(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+			}
+			if longest != c.line || data != c.data {
+				t.Fatalf("longest line %d bytes and event data %d bytes, want %d and %d", longest, data, c.line, c.data)
+			}
+			wire := []byte(head + c.event + later + "data: [DONE]\n\n")
+			lineEnd := len(head) + strings.IndexAny(c.event, "\r\n")
+			eventEnd := len(head) + strings.Index(c.event, "\n\n")
+			if strings.Contains(c.event, "\r") {
+				eventEnd = len(head) + strings.Index(c.event, "\r\n\r\n")
+			}
+			j := testJournal(t)
+			for label, reads := range capReads(wire, len(head)+lineCap, lineEnd, eventEnd) {
+				rec := observeReads(j, chatRequest, reads, EndEOF)
+				if rec.Outcome != c.outcome || tokensString(rec.Tokens) != c.tokens || deref(rec.ResponseModel) != c.model {
+					t.Errorf("%s: outcome %s tokens %s model %q, want %s %s %q", label, rec.Outcome, tokensString(rec.Tokens), deref(rec.ResponseModel), c.outcome, c.tokens, c.model)
+				}
+			}
+		})
+	}
+}
+
 func TestSSEEventDataCap(t *testing.T) {
 	const capBytes = 2 << 20
 	if got := len(strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(eventOfSize(capBytes, 9), "data: "), "\n\n"), "\ndata: ", "\n")); got != capBytes {

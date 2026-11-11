@@ -84,12 +84,9 @@ var responseShapes = []struct {
 	tokens string
 }{
 	{"messages_json_2MiB", messagesRequest, messagesJSONReads, "10/20/0/4/null"},
-	// Each event's data is one line, as CLIProxyAPI sends it; the large
-	// events stay just under the SSE line cap.
-	{"responses_sse_256KiB", requestFor("/v1/responses", `{"model":"gpt-6-luna"}`), func() [][]byte { return responsesSSEReads(maxSSELineBytes - 2<<10) }, "44/256/null/7/2"},
-	// Lines over the SSE line cap are discarded, so the large events and
-	// their usage are not parsed.
-	{"responses_sse_1MiB", requestFor("/v1/responses", `{"model":"gpt-6-luna"}`), func() [][]byte { return responsesSSEReads(1 << 20) }, "null"},
+	// Each event's data is one line, as CLIProxyAPI sends it.
+	{"responses_sse_256KiB", requestFor("/v1/responses", `{"model":"gpt-6-luna"}`), func() [][]byte { return responsesSSEReads(254 << 10) }, "44/256/null/7/2"},
+	{"responses_sse_1MiB", requestFor("/v1/responses", `{"model":"gpt-6-luna"}`), func() [][]byte { return responsesSSEReads(1 << 20) }, "44/256/null/7/2"},
 	{"anthropic_sse_2000_deltas", messagesRequest, func() [][]byte { return anthropicSSEReads(2000) }, "10/20/0/2000/null"},
 }
 
