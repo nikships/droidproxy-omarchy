@@ -736,8 +736,8 @@
       "name": "rate_limited_last_tried",
       "source": {
         "kind": "derived",
-        "from": "candidate-4 rate_limited_with_seat",
-        "changes": "Retain error shape; recompute Content-Length (candidate supplied the wrong length). Not a real captured 429."
+        "from": "none",
+        "changes": "Synthetic 429 JSON error response. Not a real capture."
       },
       "request": {
         "method": "POST",
@@ -850,7 +850,7 @@
       "source": {
         "kind": "derived",
         "from": "anthropic_json",
-        "changes": "Actually gzip-compress captured JSON, unlike candidate 4's plain-text gzip-labelled body; usage remains opaque."
+        "changes": "Gzip-compressed captured JSON; the observer does not decode it, so usage stays null."
       },
       "request": {
         "method": "POST",

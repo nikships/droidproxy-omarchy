@@ -89,12 +89,11 @@ Known legacy Claude Code shape (source fixture, not a live client capture):
 `01a06a06-e830-7da9-a866-98470a94389c`.
 Source:
 [`sdk/cliproxy/session/info_test.go`, `TestExtractSessionInfoEnhancedHarnesses`](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.61/sdk/cliproxy/session/info_test.go).
-The supplied relay/explainer contain no captured real `metadata.user_id` value.
-The supplied synthesis reports a live Droid Responses body with
-`prompt_cache_key` equal to its Factory session UUID, but gives no literal ID;
-`{"prompt_cache_key":"11111111-2222-4333-8444-555555555555"}` is an illustrative,
-redacted form, not another client capture. Droid's `/v1/messages` has no session
-ID in that capture. Do not infer its session from request content or time.
+No real `metadata.user_id` value was captured for these fixtures. Droid sends its
+session UUID as `prompt_cache_key` on `/v1/responses`, for example
+`{"prompt_cache_key":"11111111-2222-4333-8444-555555555555"}` (illustrative, not
+a capture). Droid sends no session id on `/v1/messages`. Do not infer a session
+from request content or time.
 
 The JSON form is JSON encoded *inside the user_id string*, e.g.
 `{"metadata":{"user_id":"{\"session_id\":\"json-session-0001\"}"}}` yields
@@ -102,8 +101,8 @@ The JSON form is JSON encoded *inside the user_id string*, e.g.
 starts with `{` it parses the string and reads `session_id`
 ([`sdk/cliproxy/session/identity.go`, `ClaudeMetadataIdentities`, lines 146–193](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.61/sdk/cliproxy/session/identity.go#L146-L193);
 the JSON branch is lines 161–176, and the legacy `_session_([a-f0-9-]+)$` branch
-starts at line 177). Revision 2 item 8 adds it to this contract at the same precedence
-as the suffix. The journal reads only `session_id`: it does not read the
+starts at line 177). The journal reads both forms at the same precedence. It reads
+only `session_id`: it does not read the
 `parent_session_id`, `parent_agent_id`, `parent_id`, `agent_id`, or `subagent_id`
 members, and takes no `request.metadata.user_id` envelope fallback. This journal key is therefore an
 explicit client session key used for affinity, not CLIProxyAPI's full canonical
@@ -179,8 +178,8 @@ dial-failure 502. A failed client write does not erase an observed status.
 
 First finalizer wins. A failed write of the bytes that would have completed
 framing is client_disconnected, not complete. No separate disconnect monitor
-exists. A clean HTTP chunk end without an SSE terminal event is complete under
-Revision 2's framing rule, but has tokens null if no terminal usage arrived.
+exists. A clean HTTP chunk end without an SSE terminal event is complete, since
+framing ended, but has tokens null if no terminal usage arrived.
 Conversely a terminal SSE event can complete before the HTTP connection closes.
 `complete` describes delivery/framing, not HTTP success: a fully delivered 429
 JSON error is complete with status 429, last_tried seat, and tokens null.
@@ -252,8 +251,8 @@ fixture inputs, not measured capture timings. For the missing-trace case only,
 the expected execution_id is a representative UUIDv4: compare UUIDv4 validity,
 not that literal value; no test-only production UUID hook is required.
 
-Six source captures were made through the local Mac :8317 proxy (bundled
-CLIProxyAPI v8.0.66 per the supplied source report), 2026-11-11, with identity
+Six source captures were made through a local macOS DroidProxy on :8317 (bundled
+CLIProxyAPI v8.0.66), 2026-11-11, with identity
 encoding and tiny "Reply with OK" prompts. Captures redact trace values and the
 provider's stable safety_identifier to fixed placeholders. Fixture seat email,
 org and account IDs are wholly synthetic. Both chat captures returned usage,
@@ -262,25 +261,13 @@ Derived fixtures also cover incomplete Responses, cache subtraction, Anthropic
 merge-only usage, 429, missing trace, truncation, gzip, and chunk boundaries.
 Their provenance is recorded per case; they are not claimed as real captures.
 
-### Explicit interpretations and limits
+### Limits in v1
 
-- Revision 2 supersedes old outcome names, client-delivered status, add-only seat
-  caches, and the older candidate files' field names/nullability.
-- Its broad inference-route requirement includes non-text routes absent from
-  the initial three-format plan. They are admitted but usage is unknown in v1.
-  The relay recognizes `/api/v1/responses`, but the pinned route table does not
-  serve that alias; it is not admitted. No undocumented alias is invented.
-- Revision 2 says "complete" at framing end without specifying HTTP-error
-  classification. This contract uses transport completion for HTTP errors.
-- The synthesis does not give a complete model-to-provider table or types for
-  absent models/timing counters. The ordered family table above, nullable absent
-  models, and nonnegative integer milliseconds make these choices explicit.
-- CLIProxyAPI's parent/agent identities, canonical-UUID projection, and affinity
-  normalization are intentionally not adopted; only `session_id` from the JSON
-  or suffix form of `metadata.user_id` is read.
-- Candidate 4 has unverifiable capture provenance, malformed chunk lengths, and
-  a purported gzip body that is plain JSON. Those wire fixtures are not reused
-  verbatim; derived errors retain its shapes with correct framing.
-
-Are we over-engineering this? No: one strict record definition and replay data
-let three implementations agree without adding app code or dependencies.
+- Non-text inference routes are admitted, but their usage is null.
+- The relay recognizes `/api/v1/responses`, but CLIProxyAPI v8.0.61 does not
+  serve that path, so it is not admitted.
+- `complete` means the response framing ended. HTTP errors that were fully
+  delivered are complete; status and seat role carry the failure.
+- CLIProxyAPI's parent and agent identities, canonical-UUID projection, and
+  affinity normalization are not adopted; only `session_id` from the JSON or
+  suffix form of `metadata.user_id` is read.
