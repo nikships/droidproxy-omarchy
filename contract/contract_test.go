@@ -187,6 +187,10 @@ func TestTranscriptFixtures(t *testing.T) {
 			"responses_sse_on_gemini_stream",
 			"forwarded_chat_sse_from_messages",
 			"forwarded_anthropic_sse_from_messages",
+			"chunk_size_line_exactly_64k",
+			"chunk_size_line_one_over_64k",
+			"chunk_size_int64_max_then_eof",
+			"chunk_size_over_int64",
 		} {
 			if !seen[name] {
 				t.Errorf("required transcript %q is missing", name)

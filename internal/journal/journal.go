@@ -105,8 +105,7 @@ type Observation struct {
 
 	executionID string
 	authIndex   string
-	binding     seatBinding
-	bound       bool
+	seat        *seatWork
 }
 
 // Delivered observes a buffer the client write accepted in full. readAt is
@@ -160,7 +159,7 @@ func (o *Observation) writeFailedAt(p []byte, accepted int, readAt, now time.Tim
 	accepted = min(max(accepted, 0), len(p))
 	o.observe(p[:accepted], readAt, now)
 	if o.resp.learnHead(p[accepted:]) {
-		o.noteTrace(now)
+		o.noteTrace()
 	}
 	return o.finishAt(EndClientWriteFailed, now)
 }
@@ -168,24 +167,24 @@ func (o *Observation) writeFailedAt(p []byte, accepted int, readAt, now time.Tim
 func (o *Observation) observe(p []byte, readAt, now time.Time) {
 	traceNow, bodyNow := o.resp.feed(p)
 	if traceNow {
-		o.noteTrace(now)
+		o.noteTrace()
 	}
 	if bodyNow {
 		o.firstBody = readAt
 	}
 }
 
-func (o *Observation) noteTrace(now time.Time) {
+func (o *Observation) noteTrace() {
 	executionID, index := parseTrace(o.resp.trace)
 	o.executionID = executionID
 	if index != "" {
 		o.authIndex = index
-		o.binding, o.bound = o.journal.seats.bind(index, now)
+		o.seat = o.journal.seats.startBind(index)
 	}
 }
 
-// finishAt finalizes the observation. The request fields of its record are
-// filled in later, off the relay, by pending.record.
+// finishAt finalizes the observation. The request fields and seat identity
+// of its record are filled in later, off the relay, by pending.record.
 func (o *Observation) finishAt(end End, now time.Time) (pending, bool) {
 	if o.finished {
 		return pending{}, false
@@ -251,31 +250,44 @@ func (o *Observation) finishAt(end End, now time.Time) (pending, bool) {
 		if r.status >= 200 && r.status <= 299 {
 			seat.Role = roleServed
 		}
-		if o.bound && o.journal.seats.stillBound(o.authIndex, o.binding, now) {
-			seat.File = o.binding.id.file
-			seat.Email = o.binding.id.email
-			seat.Org = o.binding.id.org
-			seat.AccountID = o.binding.id.accountID
-		}
 		rec.Seat = seat
 	}
-	return pending{rec: rec, request: o.request}, true
+	return pending{rec: rec, request: o.request, seat: o.seat}, true
 }
 
-// pending is a finalized record still waiting for its request fields.
+// pending is a finalized record still waiting for its request fields and
+// seat identity.
 type pending struct {
 	rec     Record
 	request *requestFacts
+	seat    *seatWork
 }
 
-// record waits for the request body to be parsed and returns the complete
-// record.
-func (p pending) record() Record {
+// record waits for the request body parse and the seat binding, revalidates
+// the binding, and returns the complete record. It returns false if stop is
+// closed before the waits end.
+func (p pending) record(stop <-chan struct{}) (Record, bool) {
 	if p.request != nil {
-		<-p.request.done
+		select {
+		case <-p.request.done:
+		case <-stop:
+			return Record{}, false
+		}
 		p.rec.RequestedModel = p.request.model
 		p.rec.Provider = p.request.provider
 		p.rec.ClientSession = p.request.session
 	}
-	return p.rec
+	if p.seat != nil {
+		select {
+		case <-p.seat.done:
+		case <-stop:
+			return Record{}, false
+		}
+		if id, ok := p.seat.identity(); ok {
+			seat := *p.rec.Seat
+			seat.File, seat.Email, seat.Org, seat.AccountID = id.file, id.email, id.org, id.accountID
+			p.rec.Seat = &seat
+		}
+	}
+	return p.rec, true
 }

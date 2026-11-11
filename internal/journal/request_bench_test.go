@@ -66,7 +66,7 @@ func BenchmarkRelayPathRequestBody(b *testing.B) {
 				o := j.begin(ctx, testStart)
 				fin, _ := o.finishAt(EndEOF, at(100))
 				b.StopTimer()
-				fin.record()
+				fin.record(nil)
 				b.StartTimer()
 			}
 		})
@@ -83,7 +83,7 @@ func BenchmarkRequestFields(b *testing.B) {
 			b.SetBytes(int64(len(ctx.Body)))
 			for b.Loop() {
 				fin, _ := j.begin(ctx, testStart).finishAt(EndEOF, at(100))
-				fin.record()
+				fin.record(nil)
 			}
 		})
 	}
@@ -101,7 +101,7 @@ func TestRelayPathDoesNotParseTheRequestBody(t *testing.T) {
 		o := j.begin(ctx, testStart)
 		fin, _ := o.finishAt(EndEOF, at(100))
 		fastest = min(fastest, time.Since(start))
-		if rec := fin.record(); deref(rec.RequestedModel) != "gpt-6-luna" || rec.Provider != "codex" {
+		if rec, _ := fin.record(nil); deref(rec.RequestedModel) != "gpt-6-luna" || rec.Provider != "codex" {
 			t.Fatalf("request fields: model %q provider %s", deref(rec.RequestedModel), rec.Provider)
 		}
 	}

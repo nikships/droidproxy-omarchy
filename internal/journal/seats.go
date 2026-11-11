@@ -81,6 +81,35 @@ func authIndex(authType, path string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// seatWork is one request's seat binding. It runs on its own goroutine,
+// started when the trace names an auth index, so the relay never waits for
+// the seat mutex or the auth directory; done is closed once it is set.
+type seatWork struct {
+	seats   *seatIndex
+	index   string
+	done    chan struct{}
+	binding seatBinding
+	bound   bool
+}
+
+func (s *seatIndex) startBind(index string) *seatWork {
+	w := &seatWork{seats: s, index: index, done: make(chan struct{})}
+	go func() {
+		defer close(w.done)
+		w.binding, w.bound = s.bind(index, time.Now())
+	}()
+	return w
+}
+
+// identity revalidates a finished binding and returns its identity if it
+// still holds. It runs after finalization, on the writer goroutine.
+func (w *seatWork) identity() (seatIdentity, bool) {
+	if !w.bound || !w.seats.stillBound(w.index, w.binding, time.Now()) {
+		return seatIdentity{}, false
+	}
+	return w.binding.id, true
+}
+
 // bind resolves index to exactly one bindable auth file whose identity was
 // read from the file as it is now.
 func (s *seatIndex) bind(index string, now time.Time) (seatBinding, bool) {
@@ -118,7 +147,7 @@ func (s *seatIndex) bind(index string, now time.Time) (seatBinding, bool) {
 	return seatBinding{path: entry.path, fp: entry.fp, id: entry.id}, true
 }
 
-// stillBound revalidates a binding at finalization: the index is still
+// stillBound revalidates a binding after finalization: the index is still
 // unique in the current map and names the same file, which still has the
 // bound fingerprint, is still a regular file owned by this user, and is
 // still readable.

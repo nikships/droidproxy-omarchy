@@ -8,6 +8,8 @@ import (
 )
 
 // Observation limits. They bound memory only; the relay never waits on them.
+// maxChunkLineBytes is also a framing rule: a longer chunk-size or trailer
+// line, counting its CRLF, is malformed.
 const (
 	maxHeadBytes      = 64 << 10
 	maxChunkLineBytes = 64 << 10
@@ -386,14 +388,20 @@ func (r *response) feedChunked(p []byte) {
 			}
 		default:
 			i := bytes.IndexByte(p, '\n')
-			if i < 0 {
-				r.line = append(r.line, p...)
-				if len(r.line) > maxChunkLineBytes {
-					r.malformed = true
-				}
+			seg := p
+			if i >= 0 {
+				seg = p[:i]
+			}
+			// With its LF the line must fit in maxChunkLineBytes, so the
+			// bytes before the LF may number one fewer.
+			if len(r.line)+len(seg) >= maxChunkLineBytes {
+				r.malformed = true
 				return
 			}
-			r.line = append(r.line, p[:i]...)
+			r.line = append(r.line, seg...)
+			if i < 0 {
+				return
+			}
 			p = p[i+1:]
 			line, crlf := bytes.CutSuffix(r.line, []byte("\r"))
 			if r.chunk == chunkTrailer {

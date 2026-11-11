@@ -10,20 +10,23 @@ import (
 // deliver relays one buffer that the client write accepted in full.
 func deliver(o *Observation, p []byte, readAt, writeAt time.Time) (Record, bool) {
 	fin, ok := o.deliverAt(p, readAt, writeAt)
-	return fin.record(), ok
+	rec, _ := fin.record(nil)
+	return rec, ok
 }
 
 // failWrite relays one buffer whose client write accepted only its first
 // accepted bytes and then failed.
 func failWrite(o *Observation, p []byte, accepted int, readAt, writeAt time.Time) (Record, bool) {
 	fin, ok := o.writeFailedAt(p, accepted, readAt, writeAt)
-	return fin.record(), ok
+	rec, _ := fin.record(nil)
+	return rec, ok
 }
 
 // finish ends the observation with end at now.
 func finish(o *Observation, end End, now time.Time) (Record, bool) {
 	fin, ok := o.finishAt(end, now)
-	return fin.record(), ok
+	rec, _ := fin.record(nil)
+	return rec, ok
 }
 
 var testStart = time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
@@ -225,6 +228,30 @@ func padHead(total int) string {
 	return prefix + strings.Repeat("a", total-len(prefix)-4) + "\r\n\r\n"
 }
 
+// TestTrailerLineLimit checks the 65,536-byte trailer line limit, counting
+// the CRLF, whole and one byte per read (every two-read split of 64 KiB is
+// already exercised by the chunk-size transcripts and would be slow here).
+func TestTrailerLineLimit(t *testing.T) {
+	wire := func(lineBytes int) string {
+		line := "X-T: " + strings.Repeat("a", lineBytes-len("X-T: ")-2) + "\r\n"
+		return "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n" + line + "\r\n"
+	}
+	for _, c := range []struct {
+		lineBytes int
+		want      string
+	}{{64 << 10, outcomeComplete}, {64<<10 + 1, outcomeUpstreamError}} {
+		b := []byte(wire(c.lineBytes))
+		bytewise := make([][]byte, len(b))
+		for i := range b {
+			bytewise[i] = b[i : i+1]
+		}
+		for name, reads := range map[string][][]byte{"whole": {b}, "bytewise": bytewise} {
+			if rec := observeReads(testJournal(t), chatRequest, reads, EndEOF); rec.Outcome != c.want {
+				t.Errorf("trailer line of %d bytes, %s: outcome %s, want %s", c.lineBytes, name, rec.Outcome, c.want)
+			}
+		}
+	}
+}
 func TestHeadCapCountsFromTheFinalHead(t *testing.T) {
 	atCap := observeEverySplit(t, messagesRequest, padHead(64<<10)+anthropicMessage, EndEOF)
 	if atCap.Outcome != outcomeComplete || tokensString(atCap.Tokens) != "10/0/0/4/null" {

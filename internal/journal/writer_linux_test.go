@@ -159,3 +159,24 @@ func TestWriterCloseReturnsWithAStalledLogSink(t *testing.T) {
 		t.Fatalf("failed = %d, want 3", got)
 	}
 }
+
+func TestWriterFinalDiagnosticCountsTheRecordInFlight(t *testing.T) {
+	dir := t.TempDir()
+	release := holdLock(t, monthFile(dir, "2026-11"))
+	stop := captureStderr(t)
+	w := newRecordWriter(dir, 16)
+	for i := 0; i < 8; i++ {
+		w.enqueue(queued(testRecord("2026-11-11T10:00:00.000Z", "")))
+	}
+	w.close()
+	<-w.done
+	<-w.logged
+	log := stop()
+	release()
+	if !strings.Contains(log, "Closed with 8 records dropped") {
+		t.Fatalf("final diagnostic does not count all 8 records: %q", log)
+	}
+	if got := w.dropped.Load(); got != 8 {
+		t.Fatalf("dropped = %d, want 8", got)
+	}
+}

@@ -102,7 +102,7 @@ func TestWriterRepairsTornTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := testRecord("2026-11-11T10:00:00.000Z", "")
-	if _, err := appendLine(dir, "2026-11", mustLine(t, rec)); err != nil {
+	if _, err := appendLine(dir, "2026-11", mustLine(t, rec), nil, func() bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := string(mustRead(t, path)), complete+string(mustLine(t, rec)); got != want {
@@ -112,7 +112,7 @@ func TestWriterRepairsTornTail(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"only":"torn`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := appendLine(dir, "2026-11", mustLine(t, rec)); err != nil {
+	if _, err := appendLine(dir, "2026-11", mustLine(t, rec), nil, func() bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(mustRead(t, path)); got != string(mustLine(t, rec)) {
@@ -279,11 +279,76 @@ func TestWriterCloseDoesNotWaitOnAHeldLock(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 4*time.Second {
 		t.Fatalf("close took %v", elapsed)
 	}
+	if got := w.dropped.Load(); got != 8 {
+		t.Fatalf("dropped when close returned = %d, want 8", got)
+	}
 	<-w.done
 	if got := w.dropped.Load(); got != 8 {
 		t.Fatalf("dropped = %d, want 8", got)
 	}
 	if data := mustRead(t, path); len(data) != 0 {
 		t.Fatalf("wrote while the lock was held: %q", data)
+	}
+}
+
+// waitTaken waits until the writer goroutine has taken every queued record.
+func waitTaken(t *testing.T, w *recordWriter) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(w.queue) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("writer never took the queued records")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestWriterCloseDropsARecordStillWaitingForItsRequest(t *testing.T) {
+	dir := t.TempDir()
+	w := newRecordWriter(dir, 1)
+	parse := &requestFacts{done: make(chan struct{})}
+	w.enqueue(pending{rec: testRecord("2026-11-11T10:00:00.000Z", ""), request: parse})
+	waitTaken(t, w)
+	w.close()
+	if got := w.dropped.Load(); got != 1 {
+		t.Errorf("dropped when close returned = %d, want 1", got)
+	}
+	close(parse.done)
+	<-w.done
+	if got := w.dropped.Load(); got != 1 {
+		t.Errorf("dropped after the parse finished = %d, want 1", got)
+	}
+	if data, err := os.ReadFile(monthFile(dir, "2026-11")); err == nil && len(data) != 0 {
+		t.Errorf("appended after close: %q", data)
+	}
+}
+
+func TestCloseDropsARecordStillWaitingForSeatWork(t *testing.T) {
+	authDir := t.TempDir()
+	path := writeAuthFile(t, authDir, "claude-seat.json", map[string]any{"type": "claude", "email": "seat@example.invalid"})
+	dir := filepath.Join(t.TempDir(), "journal")
+	j := New(dir, authDir, func() bool { return true })
+	j.seats.mu.Lock()
+	unlock := sync.OnceFunc(j.seats.mu.Unlock)
+	t.Cleanup(unlock)
+
+	var o *Observation
+	if !withinOrTimeout(func() {
+		o, _ = relayHead(j, authIndex("claude", path))
+		relayFinal(o)
+	}) {
+		t.Fatal("the relay waited for seat work")
+	}
+	j.Close()
+	if got := j.writer.dropped.Load(); got != 1 {
+		t.Errorf("dropped when close returned = %d, want 1", got)
+	}
+	unlock()
+	<-j.writer.done
+	if got := j.writer.dropped.Load(); got != 1 {
+		t.Errorf("dropped after the seat work finished = %d, want 1", got)
+	}
+	if data, err := os.ReadFile(monthFile(dir, o.started.UTC().Format("2006-01"))); err == nil && len(data) != 0 {
+		t.Errorf("appended after close: %q", data)
 	}
 }

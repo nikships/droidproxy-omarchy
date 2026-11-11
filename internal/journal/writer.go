@@ -29,7 +29,10 @@ const (
 	diagnosticsBacklog = 8
 )
 
-var errLockTimeout = errors.New("journal file stayed locked by another writer")
+var (
+	errLockTimeout = errors.New("journal file stayed locked by another writer")
+	errAbandoned   = errors.New("journal shutdown flush deadline passed")
+)
 
 // recordWriter appends journal lines from one goroutine behind a bounded queue.
 // enqueue never blocks or logs: a full queue drops the record, and drops and
@@ -40,6 +43,8 @@ type recordWriter struct {
 	dir   string
 	queue chan pending
 	done  chan struct{}
+	// abandon is closed when the shutdown flush deadline passes.
+	abandon chan struct{}
 
 	diagnostics chan string
 	// logged is closed once every queued diagnostic has been logged.
@@ -48,9 +53,15 @@ type recordWriter struct {
 	mu     sync.RWMutex
 	closed bool
 
-	// abandoned is set when the shutdown flush deadline passes; the writer
-	// goroutine then drops what it still dequeues.
-	abandoned atomic.Bool
+	// accepted counts queued records. settleMu orders the writer's outcome
+	// for each record against the flush deadline, so every accepted record
+	// is appended, failed, or dropped exactly once. settled counts the
+	// outcomes the writer recorded; appending is set while it appends one.
+	accepted  atomic.Uint64
+	settleMu  sync.Mutex
+	settled   uint64
+	appending bool
+	abandoned bool
 
 	dropped   atomic.Uint64
 	failed    atomic.Uint64
@@ -71,6 +82,7 @@ func newRecordWriter(dir string, queueSize int) *recordWriter {
 		dir:         dir,
 		queue:       make(chan pending, queueSize),
 		done:        make(chan struct{}),
+		abandon:     make(chan struct{}),
 		diagnostics: make(chan string, diagnosticsBacklog),
 		logged:      make(chan struct{}),
 	}
@@ -90,14 +102,15 @@ func (w *recordWriter) enqueue(p pending) {
 	}
 	select {
 	case w.queue <- p:
+		w.accepted.Add(1)
 	default:
 		w.dropped.Add(1)
 	}
 }
 
 // close stops accepting records and waits for queued ones and their
-// diagnostics until the shutdown flush deadline; records still queued then
-// are counted as dropped.
+// diagnostics until the shutdown flush deadline; records not yet appended
+// then, queued or in flight, are counted as dropped.
 func (w *recordWriter) close() {
 	deadline := time.Now().Add(shutdownFlushLimit)
 	w.mu.Lock()
@@ -109,15 +122,54 @@ func (w *recordWriter) close() {
 	select {
 	case <-w.done:
 	case <-time.After(time.Until(deadline)):
-		w.abandoned.Store(true)
-		for range w.queue {
-			w.dropped.Add(1)
-		}
+		w.abandonRemaining()
 	}
 	w.report(true)
 	select {
 	case <-w.logged:
 	case <-time.After(time.Until(deadline)):
+	}
+}
+
+// abandonRemaining runs at the flush deadline. Every accepted record that
+// the writer has neither settled nor started appending is counted as
+// dropped, and the writer then drops whatever it holds or still dequeues.
+func (w *recordWriter) abandonRemaining() {
+	w.settleMu.Lock()
+	defer w.settleMu.Unlock()
+	w.abandoned = true
+	unsettled := w.accepted.Load() - w.settled
+	if w.appending {
+		unsettled--
+	}
+	w.dropped.Add(unsettled)
+	close(w.abandon)
+}
+
+// startAppend reports whether the writer may append its current record;
+// after it returns true the deadline no longer drops that record.
+func (w *recordWriter) startAppend() bool {
+	w.settleMu.Lock()
+	defer w.settleMu.Unlock()
+	if w.abandoned {
+		return false
+	}
+	w.appending = true
+	return true
+}
+
+// settle records the writer's outcome for its current record, counted by
+// count, unless the flush deadline already counted the record as dropped.
+func (w *recordWriter) settle(count func()) {
+	w.settleMu.Lock()
+	defer w.settleMu.Unlock()
+	if w.abandoned && !w.appending {
+		return
+	}
+	w.appending = false
+	w.settled++
+	if count != nil {
+		count()
 	}
 }
 
@@ -172,22 +224,29 @@ func (w *recordWriter) run() {
 }
 
 func (w *recordWriter) write(p pending) {
-	if w.abandoned.Load() {
-		w.dropped.Add(1)
+	select {
+	case <-w.abandon:
+		return
+	default:
+	}
+	rec, ok := p.record(w.abandon)
+	if !ok {
 		return
 	}
-	rec := p.record()
 	line, err := encodeLine(rec)
 	if err != nil {
-		w.countFailure(err)
+		w.settle(func() { w.countFailure(err) })
 		return
 	}
-	removed, err := appendLine(w.dir, rec.StartedAt[:7], line)
+	removed, err := appendLine(w.dir, rec.StartedAt[:7], line, w.abandon, w.startAppend)
 	switch {
+	case errors.Is(err, errAbandoned):
 	case errors.Is(err, errLockTimeout):
-		w.dropped.Add(1)
+		w.settle(func() { w.dropped.Add(1) })
 	case err != nil:
-		w.countFailure(err)
+		w.settle(func() { w.countFailure(err) })
+	default:
+		w.settle(nil)
 	}
 	if removed > 0 {
 		w.diagnose(fmt.Sprintf("[RequestJournal] Removed %d bytes of an incomplete line from %s", removed, monthFile(w.dir, rec.StartedAt[:7])))
@@ -232,8 +291,10 @@ func monthFile(dir, month string) string {
 
 // appendLine appends one complete line under an exclusive advisory lock and
 // fsyncs it, so writers in other processes never interleave with it. It
-// returns how many bytes of an incomplete last line it removed first.
-func appendLine(dir, month string, line []byte) (removed int64, err error) {
+// returns how many bytes of an incomplete last line it removed first. It
+// gives up with errAbandoned when stop is closed during the lock wait or
+// start returns false once the lock is held; the file is unchanged then.
+func appendLine(dir, month string, line []byte, stop <-chan struct{}, start func() bool) (removed int64, err error) {
 	if err := ensurePrivateDir(dir); err != nil {
 		return 0, err
 	}
@@ -242,8 +303,11 @@ func appendLine(dir, month string, line []byte) (removed int64, err error) {
 		return 0, err
 	}
 	defer f.Close()
-	if err := lockWithin(f, lockWaitLimit); err != nil {
+	if err := lockWithin(f, lockWaitLimit, stop); err != nil {
 		return 0, err
+	}
+	if !start() {
+		return 0, errAbandoned
 	}
 	if removed, err = repairTornTail(f); err != nil {
 		return removed, err
@@ -262,8 +326,9 @@ func appendLine(dir, month string, line []byte) (removed int64, err error) {
 	return removed, nil
 }
 
-// lockWithin takes an exclusive advisory lock on f, giving up after limit.
-func lockWithin(f *os.File, limit time.Duration) error {
+// lockWithin takes an exclusive advisory lock on f, giving up after limit
+// or when stop is closed.
+func lockWithin(f *os.File, limit time.Duration, stop <-chan struct{}) error {
 	deadline := time.Now().Add(limit)
 	for delay := time.Millisecond; ; delay = min(2*delay, 50*time.Millisecond) {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -276,7 +341,11 @@ func lockWithin(f *os.File, limit time.Duration) error {
 		if time.Now().After(deadline) {
 			return errLockTimeout
 		}
-		time.Sleep(delay)
+		select {
+		case <-stop:
+			return errAbandoned
+		case <-time.After(delay):
+		}
 	}
 }
 

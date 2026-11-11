@@ -95,6 +95,9 @@ func observeSeat(t *testing.T, j *Journal, index string, between func()) *Seat {
 	t.Helper()
 	o := j.begin(RequestContext{Method: "POST", Path: "/v1/messages", ForwardedPath: "/v1/messages", Head: "POST /v1/messages HTTP/1.1"}, time.Now())
 	deliver(o, traceHead(index), time.Now(), time.Now())
+	if o.seat != nil {
+		<-o.seat.done
+	}
 	between()
 	if rec, ok := deliver(o, []byte("{}"), time.Now(), time.Now()); ok {
 		return rec.Seat
@@ -415,5 +418,76 @@ func TestSeatOwnerChangeWithSameFingerprintIsNotBound(t *testing.T) {
 	}
 	if seat := observeSeat(t, j, index, func() { chownKeepingFingerprint(t, path, 65534) }); seat == nil || *seat != only {
 		t.Errorf("owner changed between binding and finalization: seat = %+v", seat)
+	}
+}
+
+// relayHead and relayFinal are the relay's two journal calls that a seat
+// affects: the head that names the seat, and the buffer that finalizes the
+// record. Each returns how long the call took.
+func relayHead(j *Journal, index string) (*Observation, time.Duration) {
+	o := j.Begin(requestFor("/v1/messages", `{"model":"claude-x"}`))
+	start := time.Now()
+	o.Delivered(traceHead(index), time.Now())
+	return o, time.Since(start)
+}
+
+func relayFinal(o *Observation) time.Duration {
+	start := time.Now()
+	o.Delivered([]byte("{}"), time.Now())
+	return time.Since(start)
+}
+
+// withinOrTimeout runs call on its own goroutine and reports false if it
+// has not returned after a second.
+func withinOrTimeout(call func()) bool {
+	done := make(chan struct{})
+	go func() {
+		call()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(time.Second):
+		return false
+	}
+}
+
+func TestSeatWorkStaysOffTheRelay(t *testing.T) {
+	dir := t.TempDir()
+	var index string
+	for i := 0; i < 64; i++ {
+		path := authFileOfSize(t, dir, fmt.Sprintf("claude-%03d.json", i), 1<<20)
+		if i == 0 {
+			index = authIndex("claude", path)
+		}
+	}
+	j := New(filepath.Join(t.TempDir(), "journal"), dir, func() bool { return true })
+	defer j.Close()
+	const limit = time.Millisecond
+
+	o, head := relayHead(j, index)
+	if final := relayFinal(o); head > limit || final > limit {
+		t.Errorf("cold scan of 64 credential files of 1 MiB: head took %v, finalization %v", head, final)
+	}
+
+	// A refresh holds the seat mutex while it reads every credential file.
+	refreshing, release := make(chan struct{}), make(chan struct{})
+	go func() {
+		j.seats.mu.Lock()
+		close(refreshing)
+		j.seats.refreshLocked(time.Now())
+		<-release
+		j.seats.mu.Unlock()
+	}()
+	<-refreshing
+	defer close(release)
+
+	var final time.Duration
+	if !withinOrTimeout(func() { o, head = relayHead(j, index); final = relayFinal(o) }) {
+		t.Fatal("head and finalization waited for a refresh holding the seat mutex")
+	}
+	if head > limit || final > limit {
+		t.Errorf("during a refresh: head took %v, finalization %v", head, final)
 	}
 }

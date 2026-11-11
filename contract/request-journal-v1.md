@@ -144,6 +144,13 @@ The observer accepts only this framing:
 - A chunk-size line is one or more hex digits, optionally followed by `;` and a
   chunk extension, then CRLF. Any other byte before the extension or the CRLF,
   including a space or tab, is a violation, and so is a bare LF ending the line.
+- A chunk-size line, including its extension and its CRLF, must fit within
+  65,536 bytes, however the bytes were split across reads; a longer line is a
+  violation. Within that length the only restriction on the size is that its
+  value fits a signed 64-bit integer (at most 9223372036854775807): leading
+  zeros are allowed and the number of digits is not limited.
+- Each trailer line, including its CRLF, must also fit within 65,536 bytes,
+  however the bytes were split across reads; a longer line is a violation.
 - The line ending after each chunk's data is CRLF.
 
 Any violation is malformed framing. The record's outcome is `upstream_error`
@@ -398,9 +405,10 @@ when neither qualifies. The basename comes from the directory entry. Unknown
 identity fields are omitted, not null. No management key or usage-queue consumer
 is needed.
 
-At finalization the binding is revalidated: the file must have the same
-fingerprint that was bound for this request, must still be readable, and its
-auth_index must still be unique in the current map. Any failure, including a
+After finalization and before the record is written, off the relay, the
+binding is revalidated: the file must have the same fingerprint that was bound
+for this request, must still be readable, and its auth_index must still be
+unique in the current map. Any failure, including a
 replacement, disappearance, or duplicate index, leaves only
 `{auth_index, role}`. Do not attach a replacement file's current metadata to an
 earlier request.
@@ -488,8 +496,10 @@ Derived fixtures also cover incomplete Responses, cache subtraction, Anthropic
 merge-only and later cache-only usage, a message_delta model, 429, missing and
 malformed traces, truncation, gzip content and transfer codings, chunk
 boundaries, framing violations (bare LF in status, header, and trailer lines,
-trailer lines without a colon, and padded chunk-size lines), repeated trace
-headers, JSON nested at and one over the depth limit, the head and SSE caps
+trailer lines without a colon, and padded chunk-size lines), chunk-size lines
+at and one byte over the line limit, chunk sizes at and one over the int64
+maximum, repeated trace headers, JSON nested at and one over the depth limit,
+the head and SSE caps
 (including a head that reaches the cap without its terminator and then ends),
 protocol errors, null optional and extreme or fractional counters, unrecognized
 envelopes, non-strict request and response JSON, repeated request members,
