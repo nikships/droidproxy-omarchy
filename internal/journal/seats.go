@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -294,9 +295,10 @@ func fingerprintOf(info fs.FileInfo) fingerprint {
 
 // objectMembers returns the raw values of the named top-level members of a
 // strict JSON object, the last occurrence of each winning. Other members are
-// skipped without being decoded.
+// skipped without being decoded. json.Valid accepts invalid UTF-8, so it is
+// checked separately.
 func objectMembers(data []byte, names ...string) (map[string]json.RawMessage, bool) {
-	if !json.Valid(data) {
+	if !utf8.Valid(data) || !json.Valid(data) {
 		return nil, false
 	}
 	i := skipSpace(data, 0)

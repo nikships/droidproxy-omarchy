@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Observation limits. They bound the memory and the inline CPU work of
@@ -691,10 +692,12 @@ func (r *response) noteModel(obj, inner map[string]json.RawMessage) {
 const maxJSONDepth = 512
 
 // strictObject parses data as one strict JSON object nested at most
-// maxJSONDepth deep. Repeated members keep their last value.
+// maxJSONDepth deep. Repeated members keep their last value. Strict JSON is
+// valid UTF-8, which encoding/json does not check: it decodes invalid bytes
+// as U+FFFD.
 func strictObject(data []byte) map[string]json.RawMessage {
 	var obj map[string]json.RawMessage
-	if !nestedWithin(data, maxJSONDepth) || json.Unmarshal(data, &obj) != nil {
+	if !utf8.Valid(data) || !nestedWithin(data, maxJSONDepth) || json.Unmarshal(data, &obj) != nil {
 		return nil
 	}
 	return obj

@@ -147,6 +147,35 @@ func TestBeginReadsRawHeaders(t *testing.T) {
 	}
 }
 
+func TestRequestBodyWithInvalidUTF8IsNotStrict(t *testing.T) {
+	j := &Journal{enabled: func() bool { return true }, seats: newSeatIndex(t.TempDir())}
+	for _, c := range []struct {
+		name, text string
+		strict     bool
+	}{
+		{"valid two-byte sequence", "O\xc3\xa9K", true},
+		{"0xff", "O\xffK", false},
+		{"overlong", "O\xc0\xafK", false},
+		{"surrogate", "O\xed\xa0\x80K", false},
+	} {
+		o := j.Begin(RequestContext{
+			Method:        "POST",
+			Path:          "/v1/responses",
+			ForwardedPath: "/v1/responses",
+			Head:          "POST /v1/responses HTTP/1.1",
+			Body:          `{"model":"gpt-6-luna","prompt_cache_key":"cache-key-0001","input":"` + c.text + `"}`,
+		})
+		rec, _ := finish(o, EndEOF, time.Now())
+		model, session := deref(rec.RequestedModel), deref(rec.ClientSession)
+		if c.strict && (model != "gpt-6-luna" || session != "cache-key-0001" || rec.Provider != "codex") {
+			t.Errorf("%s: model=%q session=%q provider=%s, want the body read", c.name, model, session, rec.Provider)
+		}
+		if !c.strict && (model != "" || session != "" || rec.Provider != "openai") {
+			t.Errorf("%s: model=%q session=%q provider=%s, want a non-strict body", c.name, model, session, rec.Provider)
+		}
+	}
+}
+
 func deref(s *string) string {
 	if s == nil {
 		return ""

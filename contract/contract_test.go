@@ -188,6 +188,9 @@ func TestTranscriptFixtures(t *testing.T) {
 			"chunk_size_line_one_over_64k",
 			"chunk_size_int64_max_then_eof",
 			"chunk_size_over_int64",
+			"anthropic_json_invalid_utf8_unread",
+			"responses_sse_invalid_utf8_unread",
+			"anthropic_json_invalid_utf8_model",
 		} {
 			if !seen[name] {
 				t.Errorf("required transcript %q is missing", name)

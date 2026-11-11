@@ -235,6 +235,34 @@ func TestSeatIdentityReadsListedMembersOnly(t *testing.T) {
 	}
 }
 
+func TestSeatFileWithInvalidUTF8IsNotIndexed(t *testing.T) {
+	for i, c := range []struct {
+		name, token string
+		strict      bool
+	}{
+		{"valid two-byte sequence", "a\xc3\xa9b", true},
+		{"0xff", "a\xffb", false},
+		{"overlong", "a\xc0\xafb", false},
+		{"surrogate", "a\xed\xa0\x80b", false},
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, fmt.Sprintf("claude-%d.json", i))
+		data := `{"type":"claude","email":"seat@example.invalid","organization_uuid":"org-1","access_token":"` + c.token + `"}`
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		abs, _ := filepath.Abs(path)
+		j := &Journal{enabled: func() bool { return true }, seats: newSeatIndex(dir)}
+		want := Seat{AuthIndex: authIndex("claude", abs), Role: roleServed}
+		if c.strict {
+			want.File, want.Email, want.Org = filepath.Base(abs), "seat@example.invalid", "org-1"
+		}
+		if seat := observeSeat(t, j, want.AuthIndex, func() {}); seat == nil || *seat != want {
+			t.Errorf("%s: seat = %+v, want %+v", c.name, seat, want)
+		}
+	}
+}
+
 func TestClaudeOrgPrecedence(t *testing.T) {
 	for i, c := range []struct {
 		fields map[string]any
