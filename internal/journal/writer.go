@@ -110,14 +110,17 @@ func (w *recordWriter) enqueue(p pending) {
 
 // close stops accepting records and waits for queued ones and their
 // diagnostics until the shutdown flush deadline; records not yet appended
-// then, queued or in flight, are counted as dropped.
+// then, queued or in flight, are counted as dropped. Only the first call
+// does anything, so a record is never abandoned twice.
 func (w *recordWriter) close() {
 	deadline := time.Now().Add(shutdownFlushLimit)
 	w.mu.Lock()
-	if !w.closed {
-		w.closed = true
-		close(w.queue)
+	if w.closed {
+		w.mu.Unlock()
+		return
 	}
+	w.closed = true
+	close(w.queue)
 	w.mu.Unlock()
 	select {
 	case <-w.done:

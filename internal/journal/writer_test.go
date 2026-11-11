@@ -352,3 +352,30 @@ func TestCloseDropsARecordStillWaitingForSeatWork(t *testing.T) {
 		t.Errorf("appended after close: %q", data)
 	}
 }
+
+// A second Close while a record is still waiting on seat revalidation must
+// neither count that record again nor close the abandon channel twice.
+func TestCloseTwiceCountsAnAbandonedRecordOnce(t *testing.T) {
+	dir := t.TempDir()
+	path := writeAuthFile(t, dir, "claude-test.json", map[string]any{"type": "claude", "email": "test@example.invalid"})
+	j := New(filepath.Join(t.TempDir(), "journal"), dir, func() bool { return true })
+	o := j.Begin(requestFor("/v1/messages", `{"model":"claude-x"}`))
+	o.Delivered(traceHead(authIndex("claude", path)), time.Now())
+	<-o.seat.done
+	j.seats.mu.Lock()
+	o.Delivered([]byte("{}"), time.Now())
+	waitTaken(t, j.writer)
+	j.Close()
+	first := j.writer.dropped.Load()
+	start := time.Now()
+	j.Close()
+	second := time.Since(start)
+	j.seats.mu.Unlock()
+	<-j.writer.done
+	if first != 1 || j.writer.dropped.Load() != 1 {
+		t.Errorf("dropped after first Close %d, after second %d; want 1 and 1", first, j.writer.dropped.Load())
+	}
+	if second > 100*time.Millisecond {
+		t.Errorf("second Close took %v; want it to return at once", second)
+	}
+}
