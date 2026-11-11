@@ -23,6 +23,7 @@ type transcriptCase struct {
 		Endpoint string            `json:"endpoint"`
 		Headers  map[string]string `json:"headers"`
 		Body     map[string]any    `json:"body"`
+		BodyRaw  *string           `json:"body_raw"`
 	} `json:"request"`
 	Response    string `json:"response"`
 	Observation struct {
@@ -30,13 +31,15 @@ type transcriptCase struct {
 		EndedAt            string `json:"ended_at"`
 		FirstBodyElapsedMS int64  `json:"first_body_elapsed_ms"`
 		EndSignal          string `json:"end_signal"`
+		EndSignalElapsedMS *int64 `json:"end_signal_elapsed_ms"`
+		ClientWriteFailsAt *int   `json:"client_write_fails_at"`
 	} `json:"observation"`
 	SeatSnapshot           []map[string]string `json:"seat_snapshot"`
 	NondeterministicFields []string            `json:"nondeterministic_fields"`
 	Expect                 json.RawMessage     `json:"expect"`
 }
 
-func loadTranscripts(t *testing.T) []transcriptCase {
+func loadTranscripts(t testing.TB) []transcriptCase {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(contractDir, "request-journal-v1.transcripts.json"))
 	if err != nil {
@@ -87,7 +90,7 @@ func goldenRecord(t *testing.T, name string) map[string]any {
 	return nil
 }
 
-func decodeObject(t *testing.T, data []byte) map[string]any {
+func decodeObject(t testing.TB, data []byte) map[string]any {
 	t.Helper()
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -99,7 +102,7 @@ func decodeObject(t *testing.T, data []byte) map[string]any {
 }
 
 // latin1 maps each code point 0-255 of a transcript string back to one byte.
-func latin1(t *testing.T, s string) []byte {
+func latin1(t testing.TB, s string) []byte {
 	t.Helper()
 	out := make([]byte, 0, len(s))
 	for _, r := range s {
@@ -165,36 +168,76 @@ func transcriptContext(t *testing.T, c transcriptCase) RequestContext {
 	for name, value := range c.Request.Headers {
 		fmt.Fprintf(&head, "\r\n%s: %s", name, value)
 	}
-	body, err := json.Marshal(c.Request.Body)
-	if err != nil {
-		t.Fatal(err)
+	var body string
+	if c.Request.BodyRaw != nil {
+		body = *c.Request.BodyRaw
+	} else {
+		data, err := json.Marshal(c.Request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = string(data)
 	}
 	return RequestContext{
 		Method:        c.Request.Method,
 		Path:          c.Request.Endpoint,
 		ForwardedPath: c.Request.Endpoint,
 		Head:          head.String(),
-		Body:          string(body),
+		Body:          body,
 	}
 }
 
-// replay feeds chunks at the fixture's first-body time and finalizes at its
-// end time with the fixture's end signal.
+// replay relays chunks as the fixture's upstream reads: each read returns at
+// first_body_elapsed_ms and is followed by one client write of that buffer,
+// completing at ended_at. The write holding client_write_fails_at accepts
+// only the bytes before it and fails; otherwise the end signal follows the
+// last read.
 func replay(t *testing.T, j *Journal, c transcriptCase, chunks [][]byte) Record {
 	t.Helper()
-	if c.Observation.EndSignal != "eof" {
+	start := mustTime(t, c.Observation.StartedAt)
+	readAt := start.Add(time.Duration(c.Observation.FirstBodyElapsedMS) * time.Millisecond)
+	writeAt := mustTime(t, c.Observation.EndedAt)
+	endAt := writeAt
+	if ms := c.Observation.EndSignalElapsedMS; ms != nil {
+		endAt = start.Add(time.Duration(*ms) * time.Millisecond)
+	}
+	failsAt := -1
+	switch c.Observation.EndSignal {
+	case "eof":
+	case "client_write_failed":
+		failsAt = *c.Observation.ClientWriteFailsAt
+	default:
 		t.Fatalf("unsupported end signal %q", c.Observation.EndSignal)
 	}
-	start := mustTime(t, c.Observation.StartedAt)
-	firstBody := start.Add(time.Duration(c.Observation.FirstBodyElapsedMS) * time.Millisecond)
+
 	o := j.begin(transcriptContext(t, c), start)
-	for _, chunk := range chunks {
-		if len(chunk) > 0 {
-			o.feedAt(chunk, false, firstBody)
+	var rec Record
+	done := false
+	keep := func(r Record, ok bool) {
+		if ok {
+			if done {
+				t.Fatal("observation finalized twice")
+			}
+			rec, done = r, true
 		}
 	}
-	rec, ok := o.finishAt(EndEOF, mustTime(t, c.Observation.EndedAt))
-	if !ok {
+	offset := 0
+	for _, chunk := range chunks {
+		if len(chunk) == 0 {
+			continue
+		}
+		if failsAt >= 0 && failsAt < offset+len(chunk) {
+			keep(failWrite(o, chunk, failsAt-offset, readAt, writeAt))
+			if !done {
+				t.Fatal("observation did not finalize")
+			}
+			return rec
+		}
+		keep(deliver(o, chunk, readAt, writeAt))
+		offset += len(chunk)
+	}
+	keep(o.finishAt(EndEOF, endAt))
+	if !done {
 		t.Fatal("observation did not finalize")
 	}
 	return rec
@@ -221,13 +264,31 @@ func compareRecord(t *testing.T, label string, rec Record, expect map[string]any
 	}
 }
 
-func recordObject(t *testing.T, rec Record) map[string]any {
+func recordObject(t testing.TB, rec Record) map[string]any {
 	t.Helper()
 	line, err := encodeLine(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return decodeObject(t, line)
+}
+
+// twoReadSplits are the split points the contract requires: every offset,
+// or every 509th offset for responses over 64 KiB.
+func twoReadSplits(n int) []int {
+	step := 1
+	first := 0
+	if n > 64<<10 {
+		step, first = 509, 509
+	}
+	var ks []int
+	for k := first; k <= n; k += step {
+		if n > 64<<10 && k >= n {
+			break
+		}
+		ks = append(ks, k)
+	}
+	return ks
 }
 
 func TestTranscriptsReplayAtEverySplit(t *testing.T) {
@@ -246,7 +307,8 @@ func TestTranscriptsReplayAtEverySplit(t *testing.T) {
 			if err := schema.validateRecord(recordObject(t, whole)); err != nil {
 				t.Fatalf("record fails the schema: %v", err)
 			}
-			for k := 0; k <= len(wire); k++ {
+			compareRecord(t, "whole", whole, expect, minted)
+			for _, k := range twoReadSplits(len(wire)) {
 				compareRecord(t, fmt.Sprintf("split %d", k), replay(t, j, c, [][]byte{wire[:k], wire[k:]}), expect, minted)
 			}
 			bytewise := make([][]byte, len(wire))
@@ -295,9 +357,7 @@ func TestGoldenExitPaths(t *testing.T) {
 			t.Fatal("message_delta chunk not found")
 		}
 		o := contractJournal(t, anthropic.SeatSnapshot).begin(messages, start)
-		o.feedAt(wire[:cut], false, at(20))
-		o.feedAt(wire[cut:], true, at(20))
-		rec, _ := o.finishAt(EndClientWriteFailed, at(100))
+		rec, _ := failWrite(o, wire, cut, at(20), at(100))
 		check(t, schema, "client_disconnected_before_terminal_usage", rec, false)
 	})
 	t.Run("gemini_path_rewrite", func(t *testing.T) {
@@ -311,8 +371,10 @@ func TestGoldenExitPaths(t *testing.T) {
 		events := "data: {\"object\":\"chat.completion.chunk\",\"model\":\"gemini-3.1-pro-preview\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
 		wire := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n0\r\n\r\n", len(events), events)
 		o := contractJournal(t, nil).begin(ctx, start)
-		o.feedAt([]byte(wire), false, at(20))
-		rec, _ := o.finishAt(EndEOF, at(100))
+		rec, ok := deliver(o, []byte(wire), at(20), at(100))
+		if !ok {
+			rec, _ = o.finishAt(EndEOF, at(100))
+		}
 		check(t, schema, "gemini_path_rewrite", rec, true)
 	})
 }

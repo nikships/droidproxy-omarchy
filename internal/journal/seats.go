@@ -4,18 +4,27 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/nikships/droidproxy-omarchy/internal/claude"
 )
 
-// seatMissRefreshInterval limits directory rescans caused by unknown indexes.
-const seatMissRefreshInterval = time.Second
+const (
+	// seatMissRefreshInterval limits directory rescans caused by unknown indexes.
+	seatMissRefreshInterval = time.Second
+	// maxSeatFileBytes bounds how much of one auth file is read.
+	maxSeatFileBytes = 1 << 20
+)
+
+// seatFilePattern is the schema's pattern for seat.file.
+var seatFilePattern = regexp.MustCompile(`^[^/\\]+\.json$`)
 
 type fingerprint struct {
 	size  int64
@@ -31,8 +40,9 @@ type seatEntry struct {
 	path string
 	fp   fingerprint
 	id   seatIdentity
-	// readable is false when the file changed while its identity was read.
-	readable bool
+	// bindable: a regular file owned by this user whose identity was read
+	// without the file changing underneath.
+	bindable bool
 }
 
 // seatBinding is the identity bound to one request and the fingerprint of
@@ -71,8 +81,8 @@ func authIndex(authType, path string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// bind resolves index to exactly one auth file whose identity was read
-// from the file as it is now.
+// bind resolves index to exactly one bindable auth file whose identity was
+// read from the file as it is now.
 func (s *seatIndex) bind(index string, now time.Time) (seatBinding, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -88,7 +98,7 @@ func (s *seatIndex) bind(index string, now time.Time) (seatBinding, bool) {
 		return seatBinding{}, false
 	}
 	entry := entries[0]
-	fp, err := statFingerprint(entry.path)
+	fp, err := lstatFingerprint(entry.path)
 	if err != nil {
 		s.stale = true
 		return seatBinding{}, false
@@ -102,16 +112,34 @@ func (s *seatIndex) bind(index string, now time.Time) (seatBinding, bool) {
 		entry = fresh
 		entries[0] = fresh
 	}
-	if !entry.readable {
+	if !entry.bindable {
 		return seatBinding{}, false
 	}
 	return seatBinding{path: entry.path, fp: entry.fp, id: entry.id}, true
 }
 
-// stillBound reports whether the bound file is unchanged.
-func (b seatBinding) stillBound() bool {
-	fp, err := statFingerprint(b.path)
-	return err == nil && fp == b.fp
+// stillBound revalidates a binding at finalization: the index is still
+// unique in the current map and names the same file, which still has the
+// bound fingerprint and is still readable.
+func (s *seatIndex) stillBound(index string, b seatBinding, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stale {
+		s.refreshLocked(now)
+	}
+	entries := s.byIndex[index]
+	if len(entries) != 1 || entries[0].path != b.path {
+		return false
+	}
+	if fp, err := lstatFingerprint(b.path); err != nil || fp != b.fp {
+		return false
+	}
+	f, err := os.OpenFile(b.path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
 }
 
 func (s *seatIndex) refreshLocked(now time.Time) {
@@ -127,7 +155,7 @@ func (s *seatIndex) refreshLocked(now time.Time) {
 		return
 	}
 	for _, de := range names {
-		if de.IsDir() || !strings.EqualFold(filepath.Ext(de.Name()), ".json") {
+		if !strings.HasSuffix(de.Name(), ".json") {
 			continue
 		}
 		path := filepath.Join(dir, de.Name())
@@ -140,79 +168,163 @@ func (s *seatIndex) refreshLocked(now time.Time) {
 	}
 }
 
-// readSeatEntry reads the auth type and identity fields of one auth file.
-// Other members, including tokens, are never decoded.
+// readSeatEntry reads the auth type and identity fields of one directory
+// entry. Symlinks are read through, so their index resolves, but only a
+// regular file owned by this user is bindable. Other non-regular entries are
+// never opened.
 func readSeatEntry(path string) (seatEntry, string, bool) {
-	before, err := statFingerprint(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return seatEntry{}, "", false
 	}
-	data, err := os.ReadFile(path)
+	regular := info.Mode().IsRegular()
+	if !regular && info.Mode()&fs.ModeSymlink == 0 {
+		return seatEntry{}, "", false
+	}
+	flags := os.O_RDONLY | syscall.O_NONBLOCK | syscall.O_CLOEXEC
+	if regular {
+		flags |= syscall.O_NOFOLLOW
+	}
+	f, err := os.OpenFile(path, flags, 0)
 	if err != nil {
 		return seatEntry{}, "", false
 	}
-	var fields struct {
-		Type             json.RawMessage `json:"type"`
-		Email            json.RawMessage `json:"email"`
-		OrganizationUUID json.RawMessage `json:"organization_uuid"`
-		Organization     json.RawMessage `json:"organization"`
-		AccountID        json.RawMessage `json:"account_id"`
-	}
-	if json.Unmarshal(data, &fields) != nil {
+	defer f.Close()
+	if opened, err := f.Stat(); err != nil || !opened.Mode().IsRegular() {
 		return seatEntry{}, "", false
 	}
-	authType, _ := jsonString(fields.Type)
+	data, err := io.ReadAll(io.LimitReader(f, maxSeatFileBytes+1))
+	if err != nil || len(data) > maxSeatFileBytes {
+		return seatEntry{}, "", false
+	}
+	fields, ok := objectMembers(data, "type", "email", "organization_uuid", "organization", "account_id")
+	if !ok {
+		return seatEntry{}, "", false
+	}
+	authType := jsonStringOr(fields["type"])
 	if authType == "" {
 		return seatEntry{}, "", false
 	}
-	after, err := statFingerprint(path)
-	entry := seatEntry{path: path, fp: before, readable: err == nil && after == before}
 
-	entry.id.file = filepath.Base(path)
-	if strings.Contains(entry.id.file, `\`) {
-		entry.id.file = ""
+	before := fingerprintOf(info)
+	after, err := lstatFingerprint(path)
+	entry := seatEntry{
+		path:     path,
+		fp:       before,
+		bindable: regular && ownedByMe(info) && err == nil && after == before,
 	}
-	entry.id.email = trimmedString(fields.Email)
+	if name := filepath.Base(path); seatFilePattern.MatchString(name) {
+		entry.id.file = name
+	}
+	entry.id.email = jsonStringOr(fields["email"])
 	switch strings.ToLower(authType) {
 	case "claude":
-		orgFields := map[string]any{}
-		if v, ok := jsonString(fields.OrganizationUUID); ok {
-			orgFields["organization_uuid"] = v
+		entry.id.org = jsonStringOr(fields["organization_uuid"])
+		if entry.id.org == "" {
+			nested, _ := objectMembers(fields["organization"], "uuid")
+			entry.id.org = jsonStringOr(nested["uuid"])
 		}
-		if org := decodeAny(fields.Organization); org != nil {
-			orgFields["organization"] = org
-		}
-		entry.id.org = claude.OrganizationFieldsFrom(orgFields).UUID
 	case "codex":
-		entry.id.accountID = trimmedString(fields.AccountID)
+		entry.id.accountID = jsonStringOr(fields["account_id"])
 	}
 	return entry, authType, true
 }
 
-func trimmedString(raw json.RawMessage) string {
-	s, _ := jsonString(raw)
-	return strings.TrimSpace(s)
+func ownedByMe(info fs.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Getuid()
 }
 
-func decodeAny(raw json.RawMessage) any {
-	if len(raw) == 0 {
-		return nil
-	}
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return nil
-	}
-	return v
-}
-
-func statFingerprint(path string) (fingerprint, error) {
-	info, err := os.Stat(path)
+func lstatFingerprint(path string) (fingerprint, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
 		return fingerprint{}, err
 	}
+	return fingerprintOf(info), nil
+}
+
+func fingerprintOf(info fs.FileInfo) fingerprint {
 	fp := fingerprint{size: info.Size(), mtime: info.ModTime().UnixNano()}
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
 		fp.inode = uint64(st.Ino)
 	}
-	return fp, nil
+	return fp
+}
+
+// objectMembers returns the raw values of the named top-level members of a
+// strict JSON object, the last occurrence of each winning. Other members are
+// skipped without being decoded.
+func objectMembers(data []byte, names ...string) (map[string]json.RawMessage, bool) {
+	if !json.Valid(data) {
+		return nil, false
+	}
+	i := skipSpace(data, 0)
+	if data[i] != '{' {
+		return nil, false
+	}
+	members := map[string]json.RawMessage{}
+	i = skipSpace(data, i+1)
+	for data[i] != '}' {
+		keyEnd := skipString(data, i)
+		var key string
+		if json.Unmarshal(data[i:keyEnd], &key) != nil {
+			return nil, false
+		}
+		i = skipSpace(data, skipSpace(data, keyEnd)+1)
+		valueEnd := skipValue(data, i)
+		if slices.Contains(names, key) {
+			members[key] = data[i:valueEnd]
+		}
+		i = skipSpace(data, valueEnd)
+		if data[i] == ',' {
+			i = skipSpace(data, i+1)
+		}
+	}
+	return members, true
+}
+
+// The skip helpers walk JSON already checked by json.Valid.
+
+func skipSpace(data []byte, i int) int {
+	for i < len(data) && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n') {
+		i++
+	}
+	return i
+}
+
+func skipString(data []byte, i int) int {
+	for i++; data[i] != '"'; i++ {
+		if data[i] == '\\' {
+			i++
+		}
+	}
+	return i + 1
+}
+
+func skipValue(data []byte, i int) int {
+	switch data[i] {
+	case '"':
+		return skipString(data, i)
+	case '{', '[':
+		depth := 0
+		for {
+			switch data[i] {
+			case '"':
+				i = skipString(data, i)
+				continue
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+			i++
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	for i < len(data) && !strings.ContainsRune(",}] \t\r\n", rune(data[i])) {
+		i++
+	}
+	return i
 }

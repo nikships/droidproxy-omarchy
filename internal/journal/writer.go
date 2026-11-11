@@ -10,11 +10,23 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
 )
 
-const writerQueueSize = 256
+const (
+	writerQueueSize = 256
+	// lockWaitLimit bounds the wait for another writer's lock on a month
+	// file; the record is dropped after it.
+	lockWaitLimit = 500 * time.Millisecond
+	// shutdownFlushLimit bounds how long close waits for queued records.
+	shutdownFlushLimit = 2 * time.Second
+	// diagnosticsInterval is the least time between drop and failure reports.
+	diagnosticsInterval = time.Minute
+)
+
+var errLockTimeout = errors.New("journal file stayed locked by another writer")
 
 type queuedLine struct {
 	month string
@@ -22,7 +34,9 @@ type queuedLine struct {
 }
 
 // recordWriter appends journal lines from one goroutine behind a bounded queue.
-// enqueue never blocks: a full queue drops the record.
+// enqueue never blocks or logs: a full queue drops the record, and drops and
+// write failures are only counted there. The writer goroutine and close
+// report them in aggregate.
 type recordWriter struct {
 	dir   string
 	queue chan queuedLine
@@ -31,8 +45,18 @@ type recordWriter struct {
 	mu     sync.RWMutex
 	closed bool
 
-	dropped atomic.Uint64
-	failed  atomic.Uint64
+	// abandoned is set when the shutdown flush deadline passes; the writer
+	// goroutine then drops what it still dequeues.
+	abandoned atomic.Bool
+
+	dropped   atomic.Uint64
+	failed    atomic.Uint64
+	lastError atomic.Value
+
+	reportMu        sync.Mutex
+	reportedDropped uint64
+	reportedFailed  uint64
+	lastReport      time.Time
 }
 
 // newRecordWriter starts a writer for dir (created 0700 on first append).
@@ -56,17 +80,18 @@ func (w *recordWriter) enqueue(rec Record) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	if w.closed {
-		w.countDrop()
+		w.dropped.Add(1)
 		return
 	}
 	select {
 	case w.queue <- queuedLine{month: rec.StartedAt[:7], line: line}:
 	default:
-		w.countDrop()
+		w.dropped.Add(1)
 	}
 }
 
-// close stops accepting records and waits until queued ones are written.
+// close stops accepting records and waits for queued ones until the
+// shutdown flush deadline; records still queued then are counted as dropped.
 func (w *recordWriter) close() {
 	w.mu.Lock()
 	if !w.closed {
@@ -74,25 +99,73 @@ func (w *recordWriter) close() {
 		close(w.queue)
 	}
 	w.mu.Unlock()
-	<-w.done
-}
-
-func (w *recordWriter) countDrop() {
-	n := w.dropped.Add(1)
-	logx.Logf("[RequestJournal] Queue full or closed; dropped a record (%d dropped)", n)
+	select {
+	case <-w.done:
+	case <-time.After(shutdownFlushLimit):
+		w.abandoned.Store(true)
+		for range w.queue {
+			w.dropped.Add(1)
+		}
+	}
+	w.report(true)
 }
 
 func (w *recordWriter) countFailure(err error) {
-	n := w.failed.Add(1)
-	logx.Logf("[RequestJournal] Could not write a record (%d failed): %v", n, err)
+	w.lastError.Store(err.Error())
+	w.failed.Add(1)
 }
 
 func (w *recordWriter) run() {
 	defer close(w.done)
-	for q := range w.queue {
-		if err := appendLine(w.dir, q.month, q.line); err != nil {
-			w.countFailure(err)
+	tick := time.NewTicker(diagnosticsInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case q, ok := <-w.queue:
+			if !ok {
+				return
+			}
+			w.write(q)
+		case <-tick.C:
 		}
+		w.report(false)
+	}
+}
+
+func (w *recordWriter) write(q queuedLine) {
+	if w.abandoned.Load() {
+		w.dropped.Add(1)
+		return
+	}
+	switch err := appendLine(w.dir, q.month, q.line); {
+	case errors.Is(err, errLockTimeout):
+		w.dropped.Add(1)
+	case err != nil:
+		w.countFailure(err)
+	}
+}
+
+// report logs drops and write failures since the last report, at most once
+// per diagnosticsInterval; the final report at close gives the totals.
+func (w *recordWriter) report(final bool) {
+	w.reportMu.Lock()
+	defer w.reportMu.Unlock()
+	dropped, failed := w.dropped.Load(), w.failed.Load()
+	lastError, _ := w.lastError.Load().(string)
+	if final {
+		if dropped != 0 || failed != 0 {
+			logx.Logf("[RequestJournal] Closed with %d records dropped and %d write failures in total (last error: %s)", dropped, failed, lastError)
+		}
+		w.reportedDropped, w.reportedFailed = dropped, failed
+		return
+	}
+	if dropped == w.reportedDropped && failed == w.reportedFailed {
+		return
+	}
+	if now := time.Now(); now.Sub(w.lastReport) >= diagnosticsInterval {
+		logx.Logf("[RequestJournal] %d records dropped and %d write failures since the last report (last error: %s)",
+			dropped-w.reportedDropped, failed-w.reportedFailed, lastError)
+		w.reportedDropped, w.reportedFailed, w.lastReport = dropped, failed, now
 	}
 }
 
@@ -111,7 +184,7 @@ func appendLine(dir, month string, line []byte) error {
 		return err
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockWithin(f, lockWaitLimit); err != nil {
 		return err
 	}
 	if err := repairTornTail(f); err != nil {
@@ -129,6 +202,24 @@ func appendLine(dir, month string, line []byte) error {
 		return syncDir(dir)
 	}
 	return nil
+}
+
+// lockWithin takes an exclusive advisory lock on f, giving up after limit.
+func lockWithin(f *os.File, limit time.Duration) error {
+	deadline := time.Now().Add(limit)
+	for delay := time.Millisecond; ; delay = min(2*delay, 50*time.Millisecond) {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return errLockTimeout
+		}
+		time.Sleep(delay)
+	}
 }
 
 func ensurePrivateDir(dir string) error {

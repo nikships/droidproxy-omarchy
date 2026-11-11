@@ -229,3 +229,57 @@ func mustRead(t *testing.T, path string) []byte {
 	}
 	return data
 }
+
+// holdLock takes the journal's advisory lock on path the way another
+// process would, until the returned release runs.
+func holdLock(t *testing.T, path string) func() {
+	t.Helper()
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	release := sync.OnceFunc(func() {
+		_ = syscall.Flock(int(held.Fd()), syscall.LOCK_UN)
+		held.Close()
+	})
+	t.Cleanup(release)
+	return release
+}
+
+func TestWriterCloseDoesNotWaitOnAHeldLock(t *testing.T) {
+	dir := t.TempDir()
+	path := monthFile(dir, "2026-11")
+	holdLock(t, path)
+
+	w := newRecordWriter(dir, 16)
+	for i := 0; i < 8; i++ {
+		w.enqueue(testRecord("2026-11-11T10:00:00.000Z", ""))
+	}
+	start := time.Now()
+	closed := make(chan struct{})
+	go func() {
+		w.close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(6 * time.Second):
+		t.Fatal("close waited on a journal lock held elsewhere")
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Fatalf("close took %v", elapsed)
+	}
+	<-w.done
+	if got := w.dropped.Load(); got != 8 {
+		t.Fatalf("dropped = %d, want 8", got)
+	}
+	if data := mustRead(t, path); len(data) != 0 {
+		t.Fatalf("wrote while the lock was held: %q", data)
+	}
+}

@@ -2,24 +2,21 @@ package journal
 
 import (
 	"encoding/json"
-	"math"
 	"strconv"
 )
 
-// counter reads a nonnegative integral JSON number. Missing and null are
-// absent; any other value that is not such a number is malformed.
+// counter reads a JSON integer literal from 0 through the int64 maximum.
+// Missing and null are absent; anything else, including a fraction or an
+// exponent, is malformed.
 func counter(raw json.RawMessage) (n int64, present, ok bool) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return 0, false, true
 	}
-	if v, err := strconv.ParseInt(string(raw), 10, 64); err == nil {
-		return v, true, v >= 0
-	}
-	f, err := strconv.ParseFloat(string(raw), 64)
-	if err != nil || f < 0 || f != math.Trunc(f) || f > 1<<53 {
+	if !isDigits(string(raw), len(raw)) {
 		return 0, true, false
 	}
-	return int64(f), true, true
+	v, err := strconv.ParseInt(string(raw), 10, 64)
+	return v, true, err == nil
 }
 
 func requiredCounter(raw json.RawMessage) (int64, bool) {
@@ -85,7 +82,9 @@ func responsesTokens(raw json.RawMessage) *Tokens {
 	}
 	cached, ok5 := optionalCounter(inDetails["cached_tokens"])
 	reasoning, ok6 := optionalCounter(outDetails["reasoning_tokens"])
-	if !ok5 || !ok6 || valueOrZero(cached) > input {
+	_, ok7 := optionalCounter(inDetails["cache_write_tokens"])
+	_, ok8 := optionalCounter(inDetails["cached_creation_tokens"])
+	if !ok5 || !ok6 || !ok7 || !ok8 || valueOrZero(cached) > input {
 		return nil
 	}
 	return &Tokens{
@@ -112,13 +111,14 @@ func chatTokens(raw json.RawMessage) *Tokens {
 	}
 	cached, ok5 := optionalCounter(promptDetails["cached_tokens"])
 	reasoning, ok6 := optionalCounter(completionDetails["reasoning_tokens"])
-	creationKey := "cache_write_tokens"
-	if _, ok := promptDetails[creationKey]; !ok {
-		creationKey = "cached_creation_tokens"
-	}
-	cacheCreation, ok7 := optionalCounter(promptDetails[creationKey])
-	if !ok5 || !ok6 || !ok7 || valueOrZero(cached) > prompt {
+	cacheWrite, ok7 := optionalCounter(promptDetails["cache_write_tokens"])
+	cachedCreation, ok8 := optionalCounter(promptDetails["cached_creation_tokens"])
+	if !ok5 || !ok6 || !ok7 || !ok8 || valueOrZero(cached) > prompt {
 		return nil
+	}
+	cacheCreation := cacheWrite
+	if cacheCreation == nil {
+		cacheCreation = cachedCreation
 	}
 	return &Tokens{
 		InputUncached: prompt - valueOrZero(cached),

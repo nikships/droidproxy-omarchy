@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -104,6 +105,11 @@ func journalRecords(t *testing.T, p *Proxy, j *journal.Journal) []map[string]any
 	t.Helper()
 	p.Stop()
 	j.Close()
+	return readJournalFiles(t)
+}
+
+func readJournalFiles(t *testing.T) []map[string]any {
+	t.Helper()
 	files, _ := filepath.Glob(filepath.Join(paths.JournalDir(), "requests-*.jsonl"))
 	var records []map[string]any
 	for _, file := range files {
@@ -317,5 +323,78 @@ func TestJournalSkipsCountTokens(t *testing.T) {
 	roundTrip(t, p, postRequest("/v1/messages/count_tokens", `{"model":"claude-haiku-4-5-20251001"}`))
 	if records := journalRecords(t, p, j); len(records) != 0 {
 		t.Fatalf("count_tokens was journaled: %v", records)
+	}
+}
+
+// shortConn is a client connection that accepts limit bytes and then fails,
+// as when the client disconnects mid-response.
+type shortConn struct {
+	net.Conn
+	limit int
+	got   []byte
+}
+
+func (c *shortConn) Write(p []byte) (int, error) {
+	n := min(len(p), c.limit-len(c.got))
+	c.got = append(c.got, p[:n]...)
+	if n < len(p) {
+		return n, errors.New("client went away")
+	}
+	return n, nil
+}
+
+const chatUsageEvent = "data: {\"object\":\"chat.completion.chunk\",\"model\":\"gpt-6-luna\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":5}}\n\n"
+
+func TestJournalFailedClientWriteKeepsDeliveredUsage(t *testing.T) {
+	isolateHome(t)
+	if err := prefs.Shared().Set(prefs.KeyRequestJournal, true); err != nil {
+		t.Fatal(err)
+	}
+	response := "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" +
+		chunked(chatUsageEvent, "data: [DONE]\n\n")
+	upstream, backend := net.Pipe()
+	go func() {
+		_, _ = io.WriteString(backend, response)
+		backend.Close()
+	}()
+	j := journal.New(paths.JournalDir(), paths.AuthDir(), prefs.RequestJournal)
+	obs := j.Begin(journal.RequestContext{
+		Method:        "POST",
+		Path:          "/v1/chat/completions",
+		ForwardedPath: "/v1/chat/completions",
+		Head:          "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost",
+		Body:          `{"model":"gpt-6-luna"}`,
+	})
+	client := &shortConn{limit: strings.Index(response, "e\r\ndata: [DONE]")}
+	streamProxy(upstream, client, obs)
+	upstream.Close()
+	j.Close()
+
+	if string(client.got) != response[:client.limit] {
+		t.Fatalf("client received %q", client.got)
+	}
+	expectFields(t, onlyRecord(t, readJournalFiles(t)), map[string]any{
+		"outcome": "client_disconnected", "status": 200,
+		"tokens": map[string]any{"input_uncached": 9, "cache_read": 0, "cache_creation": nil, "output": 5, "reasoning": nil},
+	})
+}
+
+func TestJournalEndsAtTheWriteThatCompletesTheResponse(t *testing.T) {
+	isolateHome(t)
+	response := "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" +
+		chunked(chatUsageEvent, "data: [DONE]\n\n")
+	port, _ := rawBackend(t, func(conn net.Conn) {
+		_, _ = io.WriteString(conn, response)
+		time.Sleep(600 * time.Millisecond)
+	})
+	p, j := journalProxy(t, port, true)
+
+	if got := roundTrip(t, p, postRequest("/v1/chat/completions", `{"model":"gpt-6-luna"}`)); string(got) != response {
+		t.Fatalf("client bytes differ from upstream bytes: %q", got)
+	}
+	rec := onlyRecord(t, journalRecords(t, p, j))
+	expectFields(t, rec, map[string]any{"outcome": "complete", "status": 200})
+	if latency := rec["latency_ms"].(float64); latency >= 500 {
+		t.Fatalf("latency_ms = %v, want the time of the completing write, before upstream EOF", latency)
 	}
 }

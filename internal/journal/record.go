@@ -99,13 +99,18 @@ func newUUIDv4() string {
 }
 
 // parseTrace splits X-CPA-TRACE-ID ("YYYYMMDDHHMMSS-<auth index>-<request
-// UUID>"). Only a fully well-formed value yields an index and request id.
-func parseTrace(trace string) (index, requestID string, ok bool) {
+// UUID>") into at most three parts. The third part is the execution id
+// whenever it alone is a valid UUID; the auth index is returned only when the
+// whole trace is valid.
+func parseTrace(trace string) (executionID, index string) {
 	parts := strings.SplitN(trace, "-", 3)
-	if len(parts) != 3 || !isDigits(parts[0], 14) || !isLowerHex(parts[1], 16) || !uuidPattern.MatchString(parts[2]) {
-		return "", "", false
+	if len(parts) != 3 || !uuidPattern.MatchString(parts[2]) {
+		return "", ""
 	}
-	return parts[1], parts[2], true
+	if !isDigits(parts[0], 14) || !isLowerHex(parts[1], 16) {
+		return parts[2], ""
+	}
+	return parts[2], parts[1]
 }
 
 func isDigits(s string, n int) bool {

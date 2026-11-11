@@ -9,9 +9,11 @@ import (
 
 // Observation limits. They bound memory only; the relay never waits on them.
 const (
-	maxHeadBytes     = 64 << 10
-	maxSSELineBytes  = 256 << 10
-	maxJSONBodyBytes = 2 << 20
+	maxHeadBytes      = 64 << 10
+	maxChunkLineBytes = 64 << 10
+	maxSSELineBytes   = 256 << 10
+	maxSSEEventBytes  = 2 << 20
+	maxJSONBodyBytes  = 2 << 20
 )
 
 type framing int
@@ -32,153 +34,252 @@ const (
 	chunkTrailer
 )
 
+// envelope is the non-stream JSON body shape that carries usage for the
+// path forwarded to CLIProxyAPI.
+type envelope int
+
+const (
+	envelopeNone envelope = iota
+	envelopeAnthropic
+	envelopeResponses
+	envelopeChat
+	envelopeText
+)
+
+func envelopeFor(forwardedPath string) envelope {
+	switch forwardedPath {
+	case "/v1/messages":
+		return envelopeAnthropic
+	case "/v1/responses", "/backend-api/codex/responses":
+		return envelopeResponses
+	case "/v1/chat/completions":
+		return envelopeChat
+	case "/v1/completions":
+		return envelopeText
+	}
+	return envelopeNone
+}
+
 // response follows the bytes the client received from CLIProxyAPI: HTTP
 // head, entity framing, and the SSE or JSON body that carries usage.
 type response struct {
-	head     []byte
-	headDone bool
-	status   int
-	trace    string
+	envelope envelope
 
-	sse    bool
-	opaque bool
+	// line holds a partial head line, chunk-size or trailer line, or the
+	// CRLF expected after chunk data.
+	line      []byte
+	headBytes int
+	headLines int
+	interim   bool
+	headDone  bool
+	status    int
+	trace     string
+
+	contentLength   int64
+	hasLength       bool
+	transferCodings []string
+	sse             bool
+	opaque          bool
 
 	framing   framing
 	remaining int64
 	chunk     chunkState
-	line      []byte
 
 	sawBody bool
 
-	// completed: framing ended or a protocol terminal event arrived.
-	// failed: malformed framing or an explicit protocol error event.
-	// Whichever happens first decides; later bytes are not observed.
-	completed bool
-	failed    bool
+	// completed: protocol or HTTP framing completion. protocolError: an SSE
+	// error event. Either one finalizes the record at the write that
+	// delivered it. malformed: a framing violation or a head over the cap;
+	// observation stops and the outcome is upstream_error at finalization.
+	completed     bool
+	protocolError bool
+	malformed     bool
 
 	body         []byte
 	bodyOverflow bool
 
-	sseLine     []byte
-	sseLineLong bool
-	sseData     []byte
-	sseHasData  bool
-	sseBroken   bool
+	sseLine      []byte
+	sseLineLong  bool
+	sseData      []byte
+	sseHasData   bool
+	sseEventName string
+	sseDiscard   bool
 
-	model          string
-	anthropicUsage map[string]json.RawMessage
-	chatUsage      json.RawMessage
-	tokens         *Tokens
+	model             string
+	anthropicUsage    map[string]json.RawMessage
+	anthropicTerminal bool
+	chatPublished     bool
+	tokens            *Tokens
 }
 
-func (r *response) settled() bool { return r.completed || r.failed }
+func (r *response) settled() bool { return r.completed || r.protocolError }
 
-// feed consumes relayed bytes and reports whether they completed the final
-// response head and whether they held the first entity-body byte. headOnly
-// stops after the head: those bytes never reached the client.
-func (r *response) feed(p []byte, headOnly bool) (headNow, bodyNow bool) {
-	for len(p) > 0 && !r.settled() {
+func (r *response) stopped() bool { return r.settled() || r.malformed }
+
+// feed observes delivered bytes in wire order and stops at the first point
+// that settles or stops the observation. It reports whether the bytes
+// completed the X-CPA-TRACE-ID header line and whether they held the first
+// entity-body byte.
+func (r *response) feed(p []byte) (traceNow, bodyNow bool) {
+	for len(p) > 0 && !r.stopped() {
 		if !r.headDone {
-			p = p[r.feedHead(p):]
-			headNow = headNow || r.headDone
+			n, t := r.feedHead(p, false)
+			traceNow = traceNow || t
+			p = p[n:]
 			continue
-		}
-		if headOnly {
-			break
 		}
 		before := r.sawBody
 		r.feedBody(p)
-		p = nil
 		bodyNow = !before && r.sawBody
+		break
 	}
-	return headNow, bodyNow
+	return traceNow, bodyNow
 }
 
-func (r *response) feedHead(p []byte) int {
-	start := max(len(r.head)-3, 0)
-	r.head = append(r.head, p...)
-	idx := bytes.Index(r.head[start:], []byte("\r\n\r\n"))
-	if idx < 0 {
-		if len(r.head) > maxHeadBytes {
-			r.failed = true
-			r.head = nil
+// learnHead reads bytes the client never received for the final status line
+// and the X-CPA-TRACE-ID header only, while the head is incomplete. It never
+// marks the response malformed and never starts the entity.
+func (r *response) learnHead(p []byte) (traceNow bool) {
+	if r.headDone || r.stopped() {
+		return false
+	}
+	_, traceNow = r.feedHead(p, true)
+	return traceNow
+}
+
+// feedHead consumes head bytes line by line. Lines end in CRLF; the head
+// ends at an empty line. Each head may be at most maxHeadBytes long,
+// counted from its first byte.
+func (r *response) feedHead(p []byte, learn bool) (n int, traceNow bool) {
+	for n < len(p) {
+		room := maxHeadBytes - r.headBytes
+		if room <= 0 {
+			if !learn {
+				r.malformed = true
+			}
+			return n, traceNow
 		}
-		return len(p)
-	}
-	end := start + idx + 4
-	consumed := len(p) - (len(r.head) - end)
-	head := string(r.head[:end-4])
-	r.head = nil
-	r.parseHead(head)
-	return consumed
-}
-
-// parseHead reads a status line and headers. Interim 1xx heads are skipped.
-func (r *response) parseHead(head string) {
-	lines := strings.Split(head, "\r\n")
-	status, ok := parseStatusLine(lines[0])
-	if !ok {
-		r.failed = true
-		return
-	}
-	if status < 200 {
-		return
-	}
-	r.status = status
-	r.headDone = true
-
-	var transferCodings []string
-	contentLength := int64(-1)
-	for _, line := range lines[1:] {
-		colon := strings.IndexByte(line, ':')
-		if colon < 0 {
+		chunk := p[n:]
+		if len(chunk) > room {
+			chunk = chunk[:room]
+		}
+		i := bytes.IndexByte(chunk, '\n')
+		if i < 0 {
+			r.line = append(r.line, chunk...)
+			r.headBytes += len(chunk)
+			n += len(chunk)
 			continue
 		}
-		name, value := trimOWS(line[:colon]), trimOWS(line[colon+1:])
-		switch strings.ToLower(name) {
-		case "content-length":
-			n, err := strconv.ParseInt(value, 10, 64)
-			if err != nil || n < 0 || (contentLength >= 0 && n != contentLength) {
-				r.failed = true
-				return
-			}
-			contentLength = n
-		case "transfer-encoding":
-			for _, coding := range strings.Split(value, ",") {
-				if coding = strings.ToLower(trimOWS(coding)); coding != "" {
-					transferCodings = append(transferCodings, coding)
-				}
-			}
-		case "content-encoding":
-			for _, coding := range strings.Split(value, ",") {
-				if coding = strings.ToLower(trimOWS(coding)); coding != "" && coding != "identity" {
-					r.opaque = true
-				}
-			}
-		case "content-type":
-			mediaType, _, _ := strings.Cut(value, ";")
-			r.sse = strings.EqualFold(trimOWS(mediaType), "text/event-stream")
-		case "x-cpa-trace-id":
-			if r.trace == "" {
-				r.trace = value
-			}
+		r.line = append(r.line, chunk[:i+1]...)
+		r.headBytes += i + 1
+		n += i + 1
+		if !bytes.HasSuffix(r.line, []byte("\r\n")) {
+			continue
+		}
+		ok, t := r.headLine(r.line[:len(r.line)-2], learn)
+		r.line = r.line[:0]
+		traceNow = traceNow || t
+		if !ok || r.headDone {
+			return n, traceNow
 		}
 	}
+	return n, traceNow
+}
 
+// headLine applies one complete head line and reports whether to continue.
+func (r *response) headLine(line []byte, learn bool) (ok, traceNow bool) {
+	r.headLines++
+	if r.headLines == 1 {
+		status, valid := parseStatusLine(line)
+		if !valid {
+			r.malformed = r.malformed || !learn
+			return false, false
+		}
+		r.interim = status < 200
+		if !r.interim {
+			r.status = status
+		}
+		return true, false
+	}
+	if len(line) == 0 {
+		if r.interim {
+			r.nextHead()
+			return true, false
+		}
+		if learn {
+			return false, false
+		}
+		r.headDone = true
+		r.startEntity()
+		return true, false
+	}
+	name, value, valid := splitHeader(line)
+	if !valid {
+		r.malformed = r.malformed || !learn
+		return false, false
+	}
+	if r.interim {
+		return true, false
+	}
+	if strings.EqualFold(name, "X-CPA-TRACE-ID") {
+		if r.trace == "" && value != "" {
+			r.trace = value
+			return true, true
+		}
+		return true, false
+	}
+	if learn {
+		return true, false
+	}
+	switch strings.ToLower(name) {
+	case "content-length":
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || n < 0 || !isDigits(value, len(value)) || (r.hasLength && n != r.contentLength) {
+			r.malformed = true
+			return false, false
+		}
+		r.contentLength, r.hasLength = n, true
+	case "transfer-encoding":
+		for _, coding := range strings.Split(value, ",") {
+			if coding = strings.ToLower(trimOWS(coding)); coding != "" {
+				r.transferCodings = append(r.transferCodings, coding)
+			}
+		}
+	case "content-encoding":
+		for _, coding := range strings.Split(value, ",") {
+			if coding = strings.ToLower(trimOWS(coding)); coding != "" && coding != "identity" {
+				r.opaque = true
+			}
+		}
+	case "content-type":
+		mediaType, _, _ := strings.Cut(value, ";")
+		r.sse = strings.EqualFold(trimOWS(mediaType), "text/event-stream")
+	}
+	return true, false
+}
+
+// nextHead starts the head that follows an interim 1xx head.
+func (r *response) nextHead() {
+	r.headBytes, r.headLines, r.interim = 0, 0, false
+}
+
+func (r *response) startEntity() {
 	switch {
-	case status == 204 || status == 304:
+	case r.status == 204 || r.status == 304:
 		r.framing = framingNone
-	case len(transferCodings) > 0:
+	case len(r.transferCodings) > 0:
 		r.framing = framingClose
-		if transferCodings[len(transferCodings)-1] == "chunked" {
+		if r.transferCodings[len(r.transferCodings)-1] == "chunked" {
 			r.framing = framingChunked
 		}
-		if len(transferCodings) > 1 || r.framing != framingChunked {
-			r.opaque = true
+		for _, coding := range r.transferCodings {
+			if coding != "chunked" {
+				r.opaque = true
+			}
 		}
-	case contentLength >= 0:
+	case r.hasLength:
 		r.framing = framingLength
-		r.remaining = contentLength
+		r.remaining = r.contentLength
 	default:
 		r.framing = framingClose
 	}
@@ -187,12 +288,15 @@ func (r *response) parseHead(head string) {
 	}
 }
 
-func parseStatusLine(line string) (int, bool) {
-	if !strings.HasPrefix(line, "HTTP/") {
+// parseStatusLine accepts "HTTP/1.0" or "HTTP/1.1", a space, a status from
+// 100 through 599, and optionally a space and any reason text.
+func parseStatusLine(line []byte) (int, bool) {
+	s := string(line)
+	if !strings.HasPrefix(s, "HTTP/1.1 ") && !strings.HasPrefix(s, "HTTP/1.0 ") {
 		return 0, false
 	}
-	_, rest, ok := strings.Cut(line, " ")
-	if !ok || len(rest) < 3 || (len(rest) > 3 && rest[3] != ' ') || !isDigits(rest[:3], 3) {
+	rest := s[len("HTTP/1.1 "):]
+	if len(rest) < 3 || !isDigits(rest[:3], 3) || (len(rest) > 3 && rest[3] != ' ') {
 		return 0, false
 	}
 	status, _ := strconv.Atoi(rest[:3])
@@ -202,11 +306,37 @@ func parseStatusLine(line string) (int, bool) {
 	return status, true
 }
 
+// splitHeader splits a header line at its first colon. The name must be a
+// nonempty HTTP token.
+func splitHeader(line []byte) (name, value string, ok bool) {
+	colon := bytes.IndexByte(line, ':')
+	if colon <= 0 {
+		return "", "", false
+	}
+	for _, c := range line[:colon] {
+		if !isTokenChar(c) {
+			return "", "", false
+		}
+	}
+	return string(line[:colon]), trimOWS(string(line[colon+1:])), true
+}
+
+func isTokenChar(c byte) bool {
+	switch {
+	case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		return true
+	}
+	return strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
+}
+
 func (r *response) feedBody(p []byte) {
 	switch r.framing {
 	case framingLength:
 		n := min(int64(len(p)), r.remaining)
 		r.entity(p[:n])
+		if r.stopped() {
+			return
+		}
 		r.remaining -= n
 		if r.remaining == 0 {
 			r.framingEnded()
@@ -219,8 +349,9 @@ func (r *response) feedBody(p []byte) {
 }
 
 func (r *response) feedChunked(p []byte) {
-	for len(p) > 0 && !r.settled() {
-		if r.chunk == chunkData {
+	for len(p) > 0 && !r.stopped() {
+		switch r.chunk {
+		case chunkData:
 			n := min(int64(len(p)), r.remaining)
 			r.entity(p[:n])
 			p = p[n:]
@@ -228,25 +359,42 @@ func (r *response) feedChunked(p []byte) {
 			if r.remaining == 0 {
 				r.chunk = chunkDataEnd
 			}
-			continue
-		}
-		i := bytes.IndexByte(p, '\n')
-		if i < 0 {
-			r.line = append(r.line, p...)
-			if len(r.line) > maxHeadBytes {
-				r.failed = true
+		case chunkDataEnd:
+			if p[0] != "\r\n"[len(r.line)] {
+				r.malformed = true
+				return
 			}
-			return
-		}
-		r.line = append(r.line, p[:i]...)
-		p = p[i+1:]
-		line := strings.TrimSuffix(string(r.line), "\r")
-		r.line = r.line[:0]
-		switch r.chunk {
-		case chunkSize:
-			size, ok := parseChunkSize(line)
-			if !ok {
-				r.failed = true
+			r.line = append(r.line, p[0])
+			p = p[1:]
+			if len(r.line) == 2 {
+				r.line = r.line[:0]
+				r.chunk = chunkSize
+			}
+		default:
+			i := bytes.IndexByte(p, '\n')
+			if i < 0 {
+				r.line = append(r.line, p...)
+				if len(r.line) > maxChunkLineBytes {
+					r.malformed = true
+				}
+				return
+			}
+			r.line = append(r.line, p[:i]...)
+			p = p[i+1:]
+			line, crlf := bytes.CutSuffix(r.line, []byte("\r"))
+			if r.chunk == chunkTrailer {
+				ended := len(line) == 0
+				r.line = r.line[:0]
+				if ended {
+					r.framingEnded()
+					return
+				}
+				continue
+			}
+			size, ok := parseChunkSize(string(line))
+			r.line = r.line[:0]
+			if !crlf || !ok {
+				r.malformed = true
 				return
 			}
 			if size == 0 {
@@ -254,17 +402,6 @@ func (r *response) feedChunked(p []byte) {
 			} else {
 				r.remaining = size
 				r.chunk = chunkData
-			}
-		case chunkDataEnd:
-			if line != "" {
-				r.failed = true
-				return
-			}
-			r.chunk = chunkSize
-		case chunkTrailer:
-			if line == "" {
-				r.framingEnded()
-				return
 			}
 		}
 	}
@@ -308,39 +445,42 @@ func (r *response) entity(b []byte) {
 
 // framingEnded marks the HTTP framing complete and reads a non-stream body.
 func (r *response) framingEnded() {
-	if r.settled() {
+	if r.stopped() {
 		return
 	}
 	r.completed = true
-	if r.sse || r.opaque || r.bodyOverflow || len(r.body) == 0 {
+	if r.sse || r.opaque || r.bodyOverflow {
 		return
 	}
-	var obj map[string]json.RawMessage
-	err := json.Unmarshal(r.body, &obj)
+	obj := strictObject(r.body)
 	r.body = nil
-	if err != nil {
+	if obj == nil {
 		return
 	}
-	r.noteModel(obj, nil)
+	r.noteModel(obj)
 	switch {
-	case jsonStringOr(obj["type"]) == "message":
+	case r.envelope == envelopeAnthropic && jsonStringOr(obj["type"]) == "message":
 		r.tokens = anthropicTokens(objectOf(obj["usage"]))
-	case jsonStringOr(obj["object"]) == "response":
+	case r.envelope == envelopeResponses && jsonStringOr(obj["object"]) == "response":
 		r.tokens = responsesTokens(obj["usage"])
-	case isChatObject(obj):
+	case r.envelope == envelopeChat && jsonStringOr(obj["object"]) == "chat.completion",
+		r.envelope == envelopeText && jsonStringOr(obj["object"]) == "text_completion":
 		r.tokens = chatTokens(obj["usage"])
 	}
 }
 
+// scanSSE splits entity bytes into SSE lines. A line longer than the cap,
+// not counting its CR or LF, discards the event it belongs to.
 func (r *response) scanSSE(b []byte) {
-	for len(b) > 0 && !r.settled() {
+	for len(b) > 0 && !r.stopped() {
 		i := bytes.IndexByte(b, '\n')
 		seg := b
 		if i >= 0 {
 			seg = b[:i]
 		}
 		if !r.sseLineLong {
-			if len(r.sseLine)+len(seg) > maxSSELineBytes {
+			// One byte of room for a CR that may turn out to end the line.
+			if len(r.sseLine)+len(seg) > maxSSELineBytes+1 {
 				r.sseLineLong = true
 				r.sseLine = r.sseLine[:0]
 			} else {
@@ -351,119 +491,175 @@ func (r *response) scanSSE(b []byte) {
 			return
 		}
 		b = b[i+1:]
-		if r.sseLineLong {
-			r.sseLineLong = false
-			r.sseBroken = true
+		line := bytes.TrimSuffix(r.sseLine, []byte("\r"))
+		if r.sseLineLong || len(line) > maxSSELineBytes {
+			r.discardEvent()
 		} else {
-			r.sseFieldLine(bytes.TrimSuffix(r.sseLine, []byte("\r")))
+			r.sseFieldLine(line)
 		}
+		r.sseLineLong = false
 		r.sseLine = r.sseLine[:0]
 	}
 }
 
+// discardEvent drops the current event; lines are ignored until the blank
+// line that ends it.
+func (r *response) discardEvent() {
+	r.sseDiscard = true
+	r.sseData = r.sseData[:0]
+	r.sseHasData = false
+	r.sseEventName = ""
+}
+
 func (r *response) sseFieldLine(line []byte) {
 	if len(line) == 0 {
-		if r.sseHasData && !r.sseBroken {
-			r.sseEvent(r.sseData)
+		if r.sseHasData && !r.sseDiscard {
+			r.sseDispatch()
 		}
 		r.sseData = r.sseData[:0]
 		r.sseHasData = false
-		r.sseBroken = false
+		r.sseEventName = ""
+		r.sseDiscard = false
+		return
+	}
+	if r.sseDiscard {
 		return
 	}
 	name, value, _ := bytes.Cut(line, []byte(":"))
-	if string(name) != "data" {
-		return
-	}
 	value = bytes.TrimPrefix(value, []byte(" "))
-	if len(r.sseData)+len(value)+1 > maxSSELineBytes {
-		r.sseBroken = true
-		return
-	}
-	if r.sseHasData {
-		r.sseData = append(r.sseData, '\n')
-	}
-	r.sseData = append(r.sseData, value...)
-	r.sseHasData = true
-}
-
-// sseEvent applies one dispatched SSE data payload.
-func (r *response) sseEvent(data []byte) {
-	if string(data) == "[DONE]" {
-		r.tokens = nil
-		if r.chatUsage != nil {
-			r.tokens = chatTokens(r.chatUsage)
+	switch string(name) {
+	case "data":
+		size := len(r.sseData) + len(value)
+		if r.sseHasData {
+			size++
 		}
-		r.completed = true
-		return
-	}
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(data, &obj) != nil {
-		return
-	}
-	eventType := jsonStringOr(obj["type"])
-	switch eventType {
-	case "message_start":
-		message := objectOf(obj["message"])
-		r.noteModel(obj, message)
-		r.anthropicUsage = objectOf(message["usage"])
-	case "message_delta":
-		usage := objectOf(obj["usage"])
-		if usage == nil {
+		if size > maxSSEEventBytes {
+			r.discardEvent()
 			return
 		}
-		if r.anthropicUsage == nil {
-			r.anthropicUsage = map[string]json.RawMessage{}
+		if r.sseHasData {
+			r.sseData = append(r.sseData, '\n')
 		}
-		for k, v := range usage {
-			r.anthropicUsage[k] = v
-		}
-		if _, ok := usage["output_tokens"]; ok {
-			r.tokens = anthropicTokens(r.anthropicUsage)
-		}
+		r.sseData = append(r.sseData, value...)
+		r.sseHasData = true
+	case "event":
+		r.sseEventName = string(value)
+	}
+}
+
+// sseDispatch applies one dispatched SSE event.
+func (r *response) sseDispatch() {
+	done := string(r.sseData) == "[DONE]"
+	var obj map[string]json.RawMessage
+	if !done {
+		obj = strictObject(r.sseData)
+	}
+	if obj != nil {
+		r.noteModel(obj)
+	}
+	switch {
+	case r.sseEventName == "error":
+		r.protocolError = true
+		return
+	case done:
+		r.completed = true
+		return
+	case obj == nil:
+		return
+	}
+	rawType, hasType := obj["type"]
+	switch jsonStringOr(rawType) {
+	case "error", "response.failed", "response.error":
+		r.protocolError = true
+	case "message_start":
+		r.mergeAnthropicUsage(objectOf(objectOf(obj["message"])["usage"]), false)
+	case "message_delta":
+		usage := objectOf(obj["usage"])
+		_, carriesOutput := usage["output_tokens"]
+		r.mergeAnthropicUsage(usage, carriesOutput)
 	case "message_stop":
 		r.completed = true
 	case "response.completed", "response.incomplete":
-		inner := objectOf(obj["response"])
-		r.noteModel(obj, inner)
-		r.tokens = responsesTokens(inner["usage"])
+		r.tokens = responsesTokens(objectOf(obj["response"])["usage"])
 		r.completed = true
-	case "error", "response.failed":
-		r.failed = true
 	default:
-		if strings.HasPrefix(eventType, "response.") {
-			r.noteModel(obj, objectOf(obj["response"]))
+		if !hasType && isPresent(obj["error"]) {
+			r.protocolError = true
 			return
 		}
-		if eventType == "" && len(obj["error"]) > 0 && string(obj["error"]) != "null" {
-			r.failed = true
-			return
-		}
-		r.noteModel(obj, nil)
-		if isChatObject(obj) && len(obj["usage"]) > 0 && string(obj["usage"]) != "null" {
-			r.chatUsage = obj["usage"]
-		}
+		r.chatChunk(obj)
 	}
 }
 
-// noteModel keeps the last explicit nonempty model the response reports.
-func (r *response) noteModel(obj, inner map[string]json.RawMessage) {
-	if m := jsonStringOr(inner["model"]); m != "" {
-		r.model = m
+// mergeAnthropicUsage merges usage members field by field, later values
+// replacing earlier ones. Once a message_delta has carried output_tokens,
+// every merge re-normalizes the terminal usage.
+func (r *response) mergeAnthropicUsage(usage map[string]json.RawMessage, carriesOutput bool) {
+	if usage == nil {
 		return
 	}
-	if m := jsonStringOr(obj["model"]); m != "" {
-		r.model = m
+	if r.anthropicUsage == nil {
+		r.anthropicUsage = map[string]json.RawMessage{}
+	}
+	for k, v := range usage {
+		r.anthropicUsage[k] = v
+	}
+	r.anthropicTerminal = r.anthropicTerminal || carriesOutput
+	if r.anthropicTerminal {
+		r.tokens = anthropicTokens(r.anthropicUsage)
 	}
 }
 
-func isChatObject(obj map[string]json.RawMessage) bool {
-	object := jsonStringOr(obj["object"])
-	if strings.HasPrefix(object, "chat.completion") || object == "text_completion" {
-		return true
+// chatChunk publishes chat/text completions usage from a chunk that has a
+// non-null string finish_reason or empty choices; once published, any later
+// chunk with usage replaces it.
+func (r *response) chatChunk(obj map[string]json.RawMessage) {
+	if !isPresent(obj["usage"]) {
+		return
 	}
-	_, hasChoices := obj["choices"]
-	return object == "" && hasChoices
+	raw := obj["choices"]
+	var choices []map[string]json.RawMessage
+	if len(raw) == 0 || raw[0] != '[' || json.Unmarshal(raw, &choices) != nil {
+		return
+	}
+	qualifies := len(choices) == 0
+	for _, choice := range choices {
+		if _, ok := jsonString(choice["finish_reason"]); ok {
+			qualifies = true
+		}
+	}
+	if qualifies || r.chatPublished {
+		r.tokens = chatTokens(obj["usage"])
+		r.chatPublished = true
+	}
+}
+
+// noteModel keeps the last explicit nonempty model a payload reports, at
+// top-level model, message.model, or response.model in that order.
+func (r *response) noteModel(obj map[string]json.RawMessage) {
+	for _, m := range []string{
+		jsonStringOr(obj["model"]),
+		jsonStringOr(objectOf(obj["message"])["model"]),
+		jsonStringOr(objectOf(obj["response"])["model"]),
+	} {
+		if m != "" {
+			r.model = m
+		}
+	}
+}
+
+// strictObject parses data as one strict JSON object. Repeated members keep
+// their last value.
+func strictObject(data []byte) map[string]json.RawMessage {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(data, &obj) != nil {
+		return nil
+	}
+	return obj
+}
+
+func isPresent(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
 }
 
 func jsonStringOr(raw json.RawMessage) string {

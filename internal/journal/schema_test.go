@@ -20,7 +20,7 @@ type jsonSchema struct {
 	root map[string]any
 }
 
-func loadSchema(t *testing.T) *jsonSchema {
+func loadSchema(t testing.TB) *jsonSchema {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(contractDir, "request-journal-v1.schema.json"))
 	if err != nil {

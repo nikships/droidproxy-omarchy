@@ -2,8 +2,10 @@ package journal
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -90,9 +92,11 @@ func traceHead(index string) []byte {
 func observeSeat(t *testing.T, j *Journal, index string, between func()) *Seat {
 	t.Helper()
 	o := j.begin(RequestContext{Method: "POST", Path: "/v1/messages", ForwardedPath: "/v1/messages", Head: "POST /v1/messages HTTP/1.1"}, time.Now())
-	o.feedAt(traceHead(index), false, time.Now())
+	deliver(o, traceHead(index), time.Now(), time.Now())
 	between()
-	o.feedAt([]byte("{}"), false, time.Now())
+	if rec, ok := deliver(o, []byte("{}"), time.Now(), time.Now()); ok {
+		return rec.Seat
+	}
 	rec, _ := o.finishAt(EndEOF, time.Now())
 	return rec.Seat
 }
@@ -134,5 +138,153 @@ func TestSeatDuplicateIndexIsUnresolved(t *testing.T) {
 	seat := observeSeat(t, j, index, func() {})
 	if seat == nil || *seat != (Seat{AuthIndex: index, Role: roleServed}) {
 		t.Fatalf("duplicate index: seat = %+v", seat)
+	}
+}
+
+func TestSeatIndexFileRules(t *testing.T) {
+	dir := t.TempDir()
+	identity := map[string]any{"type": "claude", "email": "seat@example.invalid", "organization_uuid": "org-1"}
+	regular := writeAuthFile(t, dir, "claude-regular.json", identity)
+	target := writeAuthFile(t, t.TempDir(), "elsewhere.json", identity)
+	link := filepath.Join(dir, "claude-link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	upper := writeAuthFile(t, dir, "claude-upper.JSON", identity)
+	backslash := writeAuthFile(t, dir, `claude-back\slash.json`, identity)
+	bare := writeAuthFile(t, dir, ".json", identity)
+	fifo := filepath.Join(dir, "claude-fifo.json")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	j := &Journal{enabled: func() bool { return true }, seats: newSeatIndex(dir)}
+
+	only := func(path string) Seat { return Seat{AuthIndex: authIndex("claude", path), Role: roleServed} }
+	bound := func(path, file string) Seat {
+		return Seat{AuthIndex: authIndex("claude", path), Role: roleServed, File: file, Email: "seat@example.invalid", Org: "org-1"}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, c := range []struct {
+			name, path string
+			want       Seat
+		}{
+			{"regular file", regular, bound(regular, "claude-regular.json")},
+			{"symlink", link, only(link)},
+			{"uppercase extension", upper, only(upper)},
+			{"basename failing the file pattern", backslash, bound(backslash, "")},
+			{"basename that is only the extension", bare, bound(bare, "")},
+			{"fifo", fifo, only(fifo)},
+		} {
+			seat := observeSeat(t, j, c.want.AuthIndex, func() {})
+			if seat == nil || *seat != c.want {
+				t.Errorf("%s: seat = %+v, want %+v", c.name, seat, c.want)
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("seat lookup blocked on a non-regular file")
+	}
+}
+
+func TestSeatOwnedByAnotherUserIsNotBound(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("creating a file owned by another user needs root")
+	}
+	dir := t.TempDir()
+	path := writeAuthFile(t, dir, "claude-foreign.json", map[string]any{"type": "claude", "email": "seat@example.invalid"})
+	if err := os.Chown(path, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	j := &Journal{enabled: func() bool { return true }, seats: newSeatIndex(dir)}
+	index := authIndex("claude", path)
+	if seat := observeSeat(t, j, index, func() {}); seat == nil || *seat != (Seat{AuthIndex: index, Role: roleServed}) {
+		t.Fatalf("foreign-owned file: seat = %+v", seat)
+	}
+}
+
+func TestSeatIdentityReadsListedMembersOnly(t *testing.T) {
+	dir := t.TempDir()
+	claudePath := writeAuthFile(t, dir, "claude-case.json", map[string]any{
+		"type": "CLAUDE", "Email": "wrong@example.invalid", "ORGANIZATION_UUID": "wrong-org",
+		"organization": map[string]any{"uuid": "org-nested", "name": "Example Org"},
+	})
+	codexPath := writeAuthFile(t, dir, "codex-case.json", map[string]any{
+		"type": "codex", "email": "seat@example.invalid", "Account_ID": "wrong-account",
+	})
+	j := &Journal{enabled: func() bool { return true }, seats: newSeatIndex(dir)}
+	for _, c := range []struct {
+		path, authType string
+		want           Seat
+	}{
+		{claudePath, "claude", Seat{File: "claude-case.json", Org: "org-nested"}},
+		{codexPath, "codex", Seat{File: "codex-case.json", Email: "seat@example.invalid"}},
+	} {
+		c.want.AuthIndex, c.want.Role = authIndex(c.authType, c.path), roleServed
+		if seat := observeSeat(t, j, c.want.AuthIndex, func() {}); seat == nil || *seat != c.want {
+			t.Errorf("%s: seat = %+v, want %+v", c.path, seat, c.want)
+		}
+	}
+}
+
+func TestClaudeOrgPrecedence(t *testing.T) {
+	for i, c := range []struct {
+		fields map[string]any
+		org    string
+	}{
+		{map[string]any{"organization_uuid": "top", "organization": map[string]any{"uuid": "nested"}}, "top"},
+		{map[string]any{"organization": map[string]any{"uuid": "nested"}, "organization_uuid": "top"}, "top"},
+		{map[string]any{"organization_uuid": "", "organization": map[string]any{"uuid": "nested"}}, "nested"},
+		{map[string]any{"organization_uuid": 7, "organization": map[string]any{"uuid": "nested"}}, "nested"},
+		{map[string]any{"organization": map[string]any{"organization_uuid": "other"}}, ""},
+		{map[string]any{"organization": map[string]any{"uuid": ""}}, ""},
+		{map[string]any{"organization": "org-string"}, ""},
+	} {
+		dir := t.TempDir()
+		c.fields["type"] = "claude"
+		path := writeAuthFile(t, dir, fmt.Sprintf("claude-%d.json", i), c.fields)
+		j := &Journal{enabled: func() bool { return true }, seats: newSeatIndex(dir)}
+		want := Seat{AuthIndex: authIndex("claude", path), Role: roleServed, File: filepath.Base(path), Org: c.org}
+		if seat := observeSeat(t, j, want.AuthIndex, func() {}); seat == nil || *seat != want {
+			t.Errorf("%v: seat = %+v, want org %q", c.fields, seat, c.org)
+		}
+	}
+}
+
+func TestSeatRevalidatedAtFinalization(t *testing.T) {
+	dir := t.TempDir()
+	identity := map[string]any{"type": "claude", "email": "seat@example.invalid"}
+	j := &Journal{enabled: func() bool { return true }, seats: newSeatIndex(dir)}
+
+	if os.Getuid() != 0 {
+		path := writeAuthFile(t, dir, "claude-unreadable.json", identity)
+		index := authIndex("claude", path)
+		seat := observeSeat(t, j, index, func() {
+			if err := os.Chmod(path, 0); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if seat == nil || *seat != (Seat{AuthIndex: index, Role: roleServed}) {
+			t.Errorf("file unreadable at finalization: seat = %+v", seat)
+		}
+	}
+
+	path := writeAuthFile(t, dir, "claude-duplicated.json", identity)
+	other := writeAuthFile(t, dir, "claude-other.json", identity)
+	index := authIndex("claude", path)
+	j.seats.invalidate()
+	if seat := observeSeat(t, j, index, func() {}); seat == nil || seat.File != "claude-duplicated.json" {
+		t.Fatalf("unique index before the change: seat = %+v", seat)
+	}
+	seat := observeSeat(t, j, index, func() {
+		j.seats.mu.Lock()
+		j.seats.byIndex[index] = append(j.seats.byIndex[index], j.seats.byIndex[authIndex("claude", other)]...)
+		j.seats.mu.Unlock()
+	})
+	if seat == nil || *seat != (Seat{AuthIndex: index, Role: roleServed}) {
+		t.Errorf("index no longer unique at finalization: seat = %+v", seat)
 	}
 }

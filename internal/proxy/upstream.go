@@ -276,19 +276,19 @@ func (p *Proxy) sendRewrittenGrokResponse(raw []byte, client net.Conn, label str
 }
 
 // streamProxy copies the response unchanged. obs sees each chunk after the
-// client accepted it.
+// client write returned, with the bytes the client accepted.
 func streamProxy(from, to net.Conn, obs *journal.Observation) {
 	buf := make([]byte, readChunkSize)
 	for {
 		n, err := from.Read(buf)
+		readAt := time.Now()
 		if n > 0 {
-			if _, werr := to.Write(buf[:n]); werr != nil {
+			if written, werr := to.Write(buf[:n]); werr != nil {
 				logx.Logf("[ThinkingProxy] Send response error: %v", werr)
-				obs.FeedUndelivered(buf[:n])
-				obs.Finish(journal.EndClientWriteFailed)
+				obs.WriteFailed(buf[:n], written, readAt)
 				return
 			}
-			obs.Feed(buf[:n])
+			obs.Delivered(buf[:n], readAt)
 		}
 		if err != nil {
 			if err != io.EOF {
