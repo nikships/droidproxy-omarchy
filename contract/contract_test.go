@@ -166,6 +166,19 @@ func TestTranscriptFixtures(t *testing.T) {
 			"event_message_stop_with_ping_payload",
 			"sse_line_exactly_at_cap",
 			"sse_line_one_over_cap",
+			"header_line_bare_lf",
+			"status_line_bare_lf",
+			"trailer_line_without_colon",
+			"trailer_line_bare_lf",
+			"chunk_size_line_padded",
+			"trace_header_repeated_first_wins",
+			"trace_header_malformed_then_valid",
+			"request_body_depth_512",
+			"request_body_depth_513",
+			"response_body_depth_512",
+			"response_body_depth_513",
+			"head_exactly_64k_unterminated",
+			"trace_header_empty_then_valid",
 		} {
 			if !seen[name] {
 				t.Errorf("required transcript %q is missing", name)
