@@ -24,6 +24,7 @@ import (
 	"github.com/nikships/droidproxy-omarchy/internal/desktop"
 	"github.com/nikships/droidproxy-omarchy/internal/events"
 	"github.com/nikships/droidproxy-omarchy/internal/grok"
+	"github.com/nikships/droidproxy-omarchy/internal/journal"
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
 	"github.com/nikships/droidproxy-omarchy/internal/meta"
 	"github.com/nikships/droidproxy-omarchy/internal/notify"
@@ -48,6 +49,7 @@ type proxyServer interface {
 var proxyFactory = func(d *Daemon) proxyServer {
 	p := proxy.New()
 	p.UsageEndpoint = d.serveUsageEndpoint
+	p.Journal = d.journal
 	return p
 }
 
@@ -76,6 +78,7 @@ type Daemon struct {
 	metaAuth  *meta.AuthManager
 	updater   *updater.Updater
 	server    *control.Server
+	journal   *journal.Journal
 
 	monitor *auth.DirectoryMonitor
 
@@ -128,6 +131,7 @@ func (d *Daemon) run() error {
 	catalog.SetMetaKeyChecker(func() bool { return d.metaStore.HasUsableAPIKey() })
 
 	d.backend = backend.New()
+	d.journal = journal.New(paths.JournalDir(), paths.AuthDir(), prefs.RequestJournal)
 	d.proxy = proxyFactory(d)
 
 	d.usage = usage.NewTracker()
@@ -183,6 +187,7 @@ func (d *Daemon) shutdown() {
 	// Stop the thinking proxy first to stop accepting new requests, then the
 	// backend.
 	d.proxy.Stop()
+	d.journal.Close()
 	d.backend.Stop()
 	_ = d.server.Close()
 }
@@ -215,6 +220,7 @@ func (d *Daemon) startAuthMonitor() {
 }
 
 func (d *Daemon) onAuthDirectoryChanged() {
+	d.journal.AuthDirectoryChanged()
 	d.authMgr.CheckAuthStatus()
 	// SetOnChange fires for the rescan; notify explicitly as well in case the
 	// scan found nothing new.

@@ -6,6 +6,7 @@ import (
 
 	"github.com/nikships/droidproxy-omarchy/internal/claude"
 	"github.com/nikships/droidproxy-omarchy/internal/grok"
+	"github.com/nikships/droidproxy-omarchy/internal/journal"
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
 	"github.com/nikships/droidproxy-omarchy/internal/meta"
 	"github.com/nikships/droidproxy-omarchy/internal/prefs"
@@ -17,6 +18,9 @@ var antigravityModelAliases = map[string]string{
 	"ag-c46s-thinking": "claude-sonnet-4-6",
 	"ag-c46o-thinking": "claude-opus-4-6-thinking",
 }
+
+// originHeader marks DroidProxy's own requests for the request journal.
+const originHeader = "X-DroidProxy-Origin"
 
 var responsesAPIPaths = map[string]bool{
 	"/v1/responses":     true,
@@ -62,6 +66,10 @@ func (p *Proxy) processRequest(data []byte, conn net.Conn) {
 		}
 		name := strings.TrimSpace(line[:colon])
 		value := strings.TrimSpace(line[colon+1:])
+		// The internal origin marker (window primer) never leaves the proxy.
+		if strings.EqualFold(name, originHeader) {
+			continue
+		}
 		headers = append(headers, [2]string{name, value})
 	}
 
@@ -128,8 +136,15 @@ func (p *Proxy) processRequest(data []byte, conn net.Conn) {
 		rewrittenPath = newPath
 	}
 
+	obs := p.Journal.Begin(journal.RequestContext{
+		Method:        method,
+		Path:          path,
+		ForwardedPath: rewrittenPath,
+		Head:          requestString[:sep],
+		Body:          bodyString,
+	})
 	forwardHeaders := headersForForwarding(headers, fields, hasFields)
-	p.forwardRequest(method, rewrittenPath, httpVersion, forwardHeaders, modifiedBody, conn)
+	p.forwardRequest(method, rewrittenPath, httpVersion, forwardHeaders, modifiedBody, conn, obs)
 }
 
 func fieldsModel(fields requestJSONFields, hasFields bool) string {

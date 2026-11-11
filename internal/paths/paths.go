@@ -44,6 +44,9 @@ func BackendLogsDir() string { return filepath.Join(AuthDir(), "logs") }
 // DataDir is DroidProxy's private data directory (~/.droidproxy).
 func DataDir() string { return filepath.Join(Home(), ".droidproxy") }
 
+// JournalDir holds the opt-in request journal (~/.droidproxy/journal).
+func JournalDir() string { return filepath.Join(DataDir(), "journal") }
+
 // CopilotDataDir holds the Copilot API gateway's own state (~/.droidproxy/copilot-api).
 func CopilotDataDir() string { return filepath.Join(DataDir(), "copilot-api") }
 

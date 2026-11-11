@@ -91,6 +91,10 @@ Droid ──► :8317 ThinkingProxy ──► :8318 CLIProxyAPI ──► provid
 - The Omarchy shell plugin talks to the service over a private Unix socket (`$XDG_RUNTIME_DIR/droidproxy/control.sock`). See [docs/control-api.md](docs/control-api.md).
 - Service logs: `journalctl --user -u droidproxy`. Per-request reasoning log: `~/.local/state/droidproxy/droidproxy-debug.log`.
 
+### Request journal
+
+Off by default. Turn it on with the control API setting `requestJournal` ([docs/control-api.md](docs/control-api.md)). While it is on, ThinkingProxy appends one JSON line per inference request it relays to CLIProxyAPI to `~/.droidproxy/journal/requests-YYYY-MM.jsonl` (directory 0700, files 0600, one file per UTC month). Each line records the request's timing, endpoint, requested and reported model, HTTP status, how the relay ended, the CLIProxyAPI seat that served it (auth index, plus the auth file name, email, and Claude organization or Codex account id when they can be read safely), the client's explicit session key, and the token usage the response reported. It holds no prompts, response content, credentials, or other headers. Grok, Meta Muse Responses, and token-count requests are not recorded. The format is defined in [contract/request-journal-v1.md](contract/request-journal-v1.md).
+
 ## Image generation skills
 
 If you have **Grok** and/or **Codex** connected, you can generate images through the same proxy:

@@ -92,7 +92,8 @@ All keys are always present. Strings are never `null`; use `""`.
     "windowPrimerEnabled.meta": false,
     "windowPrimerMinutes.meta": 420,
     "autoCheckUpdates": true,
-    "autoInstallUpdates": false
+    "autoInstallUpdates": false,
+    "requestJournal": false         // opt-in request journal (see README)
   },
   "paths": {
     "authDir": "/home/u/.cli-proxy-api",
@@ -222,6 +223,7 @@ All keys are always present. Strings are never `null`; use `""`.
 | `metaContributorMode` | bool | Stored; affects Factory model apply. |
 | `windowPrimerEnabled.<p>`, `windowPrimerMinutes.<p>` (`<p>` is `claude`, `codex` or `meta`) | bool / int 0–1439 | "Auto-start daily": once a day at that local time (up to 2 hours late, retried every 5 minutes on failure) the daemon sends one tiny request per enabled account, so the 5-hour window is already running when work starts. Claude and Codex go through ThinkingProxy; Meta goes straight to `api.meta.ai` with each account's key. Skipped (and hidden in the panel) when every account's usage payload states a weekly-only plan with no 5-hour window; see `providers[].primerApplies`. |
 | `autoCheckUpdates`, `autoInstallUpdates` | bool | Updater behavior. |
+| `requestJournal` | bool | Off by default. When on, ThinkingProxy appends one line per inference request it relays to CLIProxyAPI to `~/.droidproxy/journal/requests-YYYY-MM.jsonl`. Takes effect on the next request. See [Request journal](../README.md#request-journal). |
 
 ### Action result
 

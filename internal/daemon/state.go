@@ -193,6 +193,7 @@ func (d *Daemon) State() control.State {
 			WindowPrimerMinutesMeta:   prefs.WindowPrimerMinutes("meta"),
 			AutoCheckUpdates:          prefs.AutoCheckUpdates(),
 			AutoInstallUpdates:        prefs.AutoInstallUpdates(),
+			RequestJournal:            prefs.RequestJournal(),
 		},
 		Paths: control.PathsInfo{
 			AuthDir:         paths.AuthDir(),

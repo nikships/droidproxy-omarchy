@@ -822,6 +822,10 @@ func (d *Daemon) setSetting(key string, value json.RawMessage) control.CallResul
 		if err := setBoolPref(prefs.KeyAutoInstallUpdates, value); err != nil {
 			return fail(err)
 		}
+	case "requestJournal":
+		if err := setBoolPref(prefs.KeyRequestJournal, value); err != nil {
+			return fail(err)
+		}
 
 	default:
 		return control.Fail("Unknown setting: " + key)
