@@ -14,7 +14,7 @@ import (
 )
 
 func testRecord(startedAt, model string) Record {
-	return Record{
+	rec := Record{
 		V:           1,
 		ExecutionID: "019a7140-0000-7000-8000-000000000001",
 		StartedAt:   startedAt,
@@ -22,14 +22,12 @@ func testRecord(startedAt, model string) Record {
 		Origin:      "client",
 		Endpoint:    "/v1/messages",
 		Provider:    "claude",
-		RequestedModel: func() *string {
-			if model == "" {
-				return nil
-			}
-			return &model
-		}(),
-		Outcome: outcomeComplete,
+		Outcome:     outcomeComplete,
 	}
+	if model != "" {
+		rec.RequestedModel = &model
+	}
+	return rec
 }
 
 func readLines(t *testing.T, path string) []string {
@@ -181,13 +179,7 @@ func TestWriterQueueOverflowDropsWithoutBlocking(t *testing.T) {
 	w := newRecordWriter(dir, 2)
 	rec := testRecord("2026-11-11T10:00:00.000Z", "")
 	w.enqueue(queued(rec))
-	deadline := time.Now().Add(5 * time.Second)
-	for len(w.queue) != 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("writer never took the first record")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitTaken(t, w)
 	start := time.Now()
 	for i := 0; i < 7; i++ {
 		w.enqueue(queued(rec))

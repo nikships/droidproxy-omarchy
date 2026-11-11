@@ -252,6 +252,7 @@ func TestTrailerLineLimit(t *testing.T) {
 		}
 	}
 }
+
 func TestHeadCapCountsFromTheFinalHead(t *testing.T) {
 	atCap := observeEverySplit(t, messagesRequest, padHead(64<<10)+anthropicMessage, EndEOF)
 	if atCap.Outcome != outcomeComplete || tokensString(atCap.Tokens) != "10/0/0/4/null" {
@@ -582,12 +583,8 @@ func TestStrictJSON(t *testing.T) {
 		{`{"type":"message","model":"a","usage":{"input_tokens":1,"output_tokens":1}} trailing`, "null", ""},
 	} {
 		rec := observeEverySplit(t, messagesRequest, jsonResponse("", c.body), EndEOF)
-		model := ""
-		if rec.ResponseModel != nil {
-			model = *rec.ResponseModel
-		}
-		if tokensString(rec.Tokens) != c.tokens || model != c.model {
-			t.Errorf("%s: tokens %s model %q", c.body, tokensString(rec.Tokens), model)
+		if tokensString(rec.Tokens) != c.tokens || deref(rec.ResponseModel) != c.model {
+			t.Errorf("%s: tokens %s model %q", c.body, tokensString(rec.Tokens), deref(rec.ResponseModel))
 		}
 	}
 	for _, c := range []struct {

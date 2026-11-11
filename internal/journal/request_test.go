@@ -2,6 +2,7 @@ package journal
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -119,7 +120,7 @@ func TestClientSession(t *testing.T) {
 		{"metadata legacy", nil, `{"metadata":{"user_id":"user_123_acc__session_01a06a06-e830-7da9-a866-98470a94389c"}}`, "01a06a06-e830-7da9-a866-98470a94389c"},
 		{"metadata legacy last marker", nil, `{"metadata":{"user_id":"a_session_first-one-x_session_second-one"}}`, "second-one"},
 		{"metadata without marker", nil, `{"metadata":{"user_id":"user_123_account"}}`, ""},
-		{"too long", [][2]string{{"X-Session-ID", string(make129())}}, `{}`, ""},
+		{"too long", [][2]string{{"X-Session-ID", strings.Repeat("a", 129)}}, `{}`, ""},
 		{"no candidate", nil, `{}`, ""},
 	} {
 		var body map[string]json.RawMessage
@@ -144,14 +145,6 @@ func TestBeginReadsRawHeaders(t *testing.T) {
 	if deref(rec.ClientSession) != "header-session-1" || rec.Origin != "primer" || rec.Provider != "claude" {
 		t.Fatalf("session=%q origin=%s provider=%s", deref(rec.ClientSession), rec.Origin, rec.Provider)
 	}
-}
-
-func make129() []byte {
-	b := make([]byte, 129)
-	for i := range b {
-		b[i] = 'a'
-	}
-	return b
 }
 
 func deref(s *string) string {

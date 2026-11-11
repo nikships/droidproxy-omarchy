@@ -333,8 +333,6 @@ func TestGoldenExitPaths(t *testing.T) {
 	for _, c := range cases {
 		byName[c.Name] = c
 	}
-	start := mustTime(t, "2026-11-11T10:00:00.000Z")
-	at := func(ms int) time.Time { return start.Add(time.Duration(ms) * time.Millisecond) }
 	messages := RequestContext{
 		Method:        "POST",
 		Path:          "/v1/messages",
@@ -345,12 +343,12 @@ func TestGoldenExitPaths(t *testing.T) {
 	anthropic := byName["anthropic_sse"]
 
 	t.Run("backend_unreachable_502", func(t *testing.T) {
-		o := contractJournal(t, nil).begin(messages, start)
+		o := contractJournal(t, nil).begin(messages, testStart)
 		rec, _ := finish(o, EndBackendUnreachable, at(3))
 		check(t, schema, "backend_unreachable_502", rec, true)
 	})
 	t.Run("upstream_error_before_status", func(t *testing.T) {
-		o := contractJournal(t, nil).begin(messages, start)
+		o := contractJournal(t, nil).begin(messages, testStart)
 		rec, _ := finish(o, EndSendFailed, at(100))
 		check(t, schema, "upstream_error_before_status", rec, true)
 	})
@@ -360,7 +358,7 @@ func TestGoldenExitPaths(t *testing.T) {
 		if cut < 0 {
 			t.Fatal("message_delta chunk not found")
 		}
-		o := contractJournal(t, anthropic.SeatSnapshot).begin(messages, start)
+		o := contractJournal(t, anthropic.SeatSnapshot).begin(messages, testStart)
 		rec, _ := failWrite(o, wire, cut, at(20), at(100))
 		check(t, schema, "client_disconnected_before_terminal_usage", rec, false)
 	})
@@ -374,7 +372,7 @@ func TestGoldenExitPaths(t *testing.T) {
 		}
 		events := "data: {\"object\":\"chat.completion.chunk\",\"model\":\"gemini-3.1-pro-preview\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
 		wire := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n0\r\n\r\n", len(events), events)
-		o := contractJournal(t, nil).begin(ctx, start)
+		o := contractJournal(t, nil).begin(ctx, testStart)
 		rec, ok := deliver(o, []byte(wire), at(20), at(100))
 		if !ok {
 			rec, _ = finish(o, EndEOF, at(100))

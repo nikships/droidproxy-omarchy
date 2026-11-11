@@ -52,13 +52,7 @@ func TestWriterDropDiagnosticsAreAggregatedOffTheCaller(t *testing.T) {
 
 	w := newRecordWriter(dir, 1)
 	w.enqueue(queued(rec))
-	deadline := time.Now().Add(5 * time.Second)
-	for len(w.queue) != 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("writer never took the first record")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitTaken(t, w)
 
 	stop := captureStderr(t)
 	for i := 0; i < 500; i++ {

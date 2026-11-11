@@ -250,7 +250,7 @@ func (r *response) headLine(line []byte, learn bool) (ok, traceNow bool) {
 	switch strings.ToLower(name) {
 	case "content-length":
 		n, err := strconv.ParseInt(value, 10, 64)
-		if err != nil || n < 0 || !isDigits(value, len(value)) || (r.hasLength && n != r.contentLength) {
+		if err != nil || !isDigits(value, len(value)) || (r.hasLength && n != r.contentLength) {
 			r.malformed = true
 			return false, false
 		}
