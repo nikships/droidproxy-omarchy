@@ -1,0 +1,231 @@
+package journal
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+)
+
+func testRecord(startedAt, model string) Record {
+	return Record{
+		V:           1,
+		ExecutionID: "019a7140-0000-7000-8000-000000000001",
+		StartedAt:   startedAt,
+		EndedAt:     startedAt,
+		Origin:      "client",
+		Endpoint:    "/v1/messages",
+		Provider:    "claude",
+		RequestedModel: func() *string {
+			if model == "" {
+				return nil
+			}
+			return &model
+		}(),
+		Outcome: outcomeComplete,
+	}
+}
+
+func readLines(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		t.Fatalf("%s does not end with LF", path)
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+}
+
+func TestWriterAppendsToPrivateMonthFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "journal")
+	w := newRecordWriter(dir, 8)
+	rec := testRecord("2026-11-30T23:59:59.999Z", "claude-haiku-4-5-20251001")
+	w.enqueue(rec)
+	w.close()
+
+	path := filepath.Join(dir, "requests-2026-11.jsonl")
+	want, _ := encodeLine(rec)
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, want) {
+		t.Fatalf("file = %q, want %q", got, want)
+	}
+	for p, mode := range map[string]os.FileMode{dir: 0o700, path: 0o600} {
+		info, err := os.Stat(p)
+		if err != nil || info.Mode().Perm() != mode {
+			t.Fatalf("%s mode = %v, want %v (%v)", p, info.Mode().Perm(), mode, err)
+		}
+	}
+	if w.dropped.Load() != 0 || w.failed.Load() != 0 {
+		t.Fatalf("dropped=%d failed=%d", w.dropped.Load(), w.failed.Load())
+	}
+}
+
+func TestWriterRefusesSymlinkAndNonRegularFiles(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, monthFile(dir, "2026-11")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(monthFile(dir, "2026-12"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := newRecordWriter(dir, 8)
+	w.enqueue(testRecord("2026-11-11T10:00:00.000Z", ""))
+	w.enqueue(testRecord("2026-12-11T10:00:00.000Z", ""))
+	w.close()
+	if data, _ := os.ReadFile(target); len(data) != 0 {
+		t.Fatalf("wrote through a symlink: %q", data)
+	}
+	if w.failed.Load() != 2 {
+		t.Fatalf("failed = %d, want 2", w.failed.Load())
+	}
+}
+
+func TestWriterRepairsTornTail(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := monthFile(dir, "2026-11")
+	complete := `{"v":1,"complete":true}` + "\n"
+	if err := os.WriteFile(path, []byte(complete+`{"v":1,"torn`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := testRecord("2026-11-11T10:00:00.000Z", "")
+	if err := appendLine(dir, "2026-11", mustLine(t, rec)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(mustRead(t, path)), complete+string(mustLine(t, rec)); got != want {
+		t.Fatalf("file = %q, want %q", got, want)
+	}
+
+	if err := os.WriteFile(path, []byte(`{"only":"torn`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendLine(dir, "2026-11", mustLine(t, rec)); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(mustRead(t, path)); got != string(mustLine(t, rec)) {
+		t.Fatalf("file = %q", got)
+	}
+}
+
+// Two writers on separate file handles stand in for two processes: flock
+// locks belong to the open file description on Linux and macOS.
+func TestConcurrentWritersNeverInterleave(t *testing.T) {
+	dir := t.TempDir()
+	big := strings.Repeat("m", 256<<10)
+	const perWriter = 64
+	var wg sync.WaitGroup
+	for w := 0; w < 2; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			writer := newRecordWriter(dir, perWriter)
+			for i := 0; i < perWriter; i++ {
+				writer.enqueue(testRecord("2026-11-11T10:00:00.000Z", big+string(rune('a'+w))))
+			}
+			writer.close()
+		}(w)
+	}
+	wg.Wait()
+
+	f, err := os.Open(monthFile(dir, "2026-11"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+	count := 0
+	for scanner.Scan() {
+		var rec Record
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			t.Fatalf("line %d is not one record: %v", count, err)
+		}
+		count++
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2*perWriter {
+		t.Fatalf("%d lines, want %d", count, 2*perWriter)
+	}
+}
+
+func TestWriterQueueOverflowDropsWithoutBlocking(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := monthFile(dir, "2026-11")
+	held, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	w := newRecordWriter(dir, 2)
+	rec := testRecord("2026-11-11T10:00:00.000Z", "")
+	w.enqueue(rec)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(w.queue) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("writer never took the first record")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	start := time.Now()
+	for i := 0; i < 7; i++ {
+		w.enqueue(rec)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("enqueue blocked for %v", elapsed)
+	}
+	if w.dropped.Load() != 5 {
+		t.Fatalf("dropped = %d, want 5", w.dropped.Load())
+	}
+
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	w.close()
+	if lines := readLines(t, path); len(lines) != 3 {
+		t.Fatalf("%d lines written, want 3", len(lines))
+	}
+	w.enqueue(rec)
+	if w.dropped.Load() != 6 {
+		t.Fatalf("enqueue after Close was not dropped")
+	}
+}
+
+func mustLine(t *testing.T, rec Record) []byte {
+	t.Helper()
+	line, err := encodeLine(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return line
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
