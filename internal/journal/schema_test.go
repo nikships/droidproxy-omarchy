@@ -14,8 +14,9 @@ import (
 )
 
 // jsonSchema interprets the JSON Schema keywords the v1 schema uses: $ref,
-// type, const, enum, pattern, minLength, minimum, maximum, format, required,
-// properties, additionalProperties, anyOf, allOf, if/then/else.
+// type, const, enum, pattern, minLength, minimum, maximum, format (date-time
+// and uuid), required, properties, additionalProperties (false only), anyOf,
+// allOf, if/then/else. loadSchema rejects a schema that uses anything else.
 type jsonSchema struct {
 	root map[string]any
 }
@@ -30,7 +31,54 @@ func loadSchema(t testing.TB) *jsonSchema {
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatal(err)
 	}
+	if err := checkKeywords(root, "#"); err != nil {
+		t.Fatal(err)
+	}
 	return &jsonSchema{root: root}
+}
+
+var schemaKeywords = map[string]bool{
+	"$schema": true, "$id": true, "$defs": true, "title": true, "description": true,
+	"$ref": true, "type": true, "const": true, "enum": true, "pattern": true, "minLength": true,
+	"minimum": true, "maximum": true, "format": true, "required": true, "properties": true,
+	"additionalProperties": true, "anyOf": true, "allOf": true, "if": true, "then": true, "else": true,
+}
+
+// checkKeywords fails on any keyword, format, or additionalProperties schema
+// in schema or its subschemas that validate does not interpret, since
+// validate would otherwise skip it and accept what the schema rejects.
+func checkKeywords(schema map[string]any, at string) error {
+	for key, value := range schema {
+		if !schemaKeywords[key] {
+			return fmt.Errorf("%s: unsupported keyword %s", at, key)
+		}
+		var subs map[string]any
+		switch key {
+		case "format":
+			if value != "date-time" && value != "uuid" {
+				return fmt.Errorf("%s: unsupported format %v", at, value)
+			}
+		case "additionalProperties":
+			if _, ok := value.(bool); !ok {
+				return fmt.Errorf("%s: unsupported additionalProperties schema", at)
+			}
+		case "properties", "$defs":
+			subs, _ = value.(map[string]any)
+		case "anyOf", "allOf":
+			subs = map[string]any{}
+			for i, sub := range value.([]any) {
+				subs[fmt.Sprint(i)] = sub
+			}
+		case "if", "then", "else":
+			subs = map[string]any{"": value}
+		}
+		for name, sub := range subs {
+			if err := checkKeywords(sub.(map[string]any), at+"/"+key+"/"+name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *jsonSchema) validateRecord(rec map[string]any) error {
@@ -69,9 +117,14 @@ func (s *jsonSchema) validate(schema map[string]any, v any, at string) error {
 		if n, ok := schema["minLength"].(float64); ok && float64(len([]rune(str))) < n {
 			return fmt.Errorf("%s: %q is too short", at, str)
 		}
-		if schema["format"] == "date-time" {
+		switch schema["format"] {
+		case "date-time":
 			if _, err := time.Parse(time.RFC3339Nano, str); err != nil {
 				return fmt.Errorf("%s: %v", at, err)
+			}
+		case "uuid":
+			if !uuidFormat.MatchString(str) {
+				return fmt.Errorf("%s: %q is not a UUID", at, str)
 			}
 		}
 	}
@@ -138,6 +191,8 @@ func (s *jsonSchema) validate(schema map[string]any, v any, at string) error {
 	return nil
 }
 
+var uuidFormat = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
 func matchesType(want, v any) bool {
 	if list, ok := want.([]any); ok {
 		for _, w := range list {
@@ -196,4 +251,21 @@ func asStrings(v any) []string {
 		out = append(out, item.(string))
 	}
 	return out
+}
+
+func TestSchemaCheckRejectsUninterpretedKeywords(t *testing.T) {
+	for _, schema := range []string{
+		`{"properties":{"x":{"type":"string","maxLength":3}}}`,
+		`{"$defs":{"d":{"anyOf":[{"type":"string","format":"email"}]}}}`,
+		`{"additionalProperties":{"type":"string"}}`,
+		`{"if":{"const":1},"then":{"items":{}}}`,
+	} {
+		var root map[string]any
+		if err := json.Unmarshal([]byte(schema), &root); err != nil {
+			t.Fatal(err)
+		}
+		if err := checkKeywords(root, "#"); err == nil {
+			t.Errorf("%s: accepted", schema)
+		}
+	}
 }

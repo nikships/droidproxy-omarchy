@@ -90,7 +90,7 @@ func TestContractStructure(t *testing.T) {
 	if valid == 0 || invalid == 0 {
 		t.Fatal("goldens must include both valid and invalid records")
 	}
-	t.Logf("%d valid and %d invalid wrappers; record schema validation is separately required via uvx check-jsonschema", valid, invalid)
+	t.Logf("%d valid and %d invalid wrappers; records are validated against the schema by TestSchemaValidatorMatchesGoldens in internal/journal", valid, invalid)
 }
 
 func TestTranscriptFixtures(t *testing.T) {

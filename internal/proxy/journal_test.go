@@ -227,6 +227,25 @@ func TestJournalRecordsNonStreamedResponse(t *testing.T) {
 	})
 }
 
+func TestJournalRecordsRewrittenGeminiPath(t *testing.T) {
+	isolateHome(t)
+	response := "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" +
+		chunked(chatUsageEvent, "data: [DONE]\n\n")
+	port, requests := rawBackend(t, func(conn net.Conn) { _, _ = io.WriteString(conn, response) })
+	p, j := journalProxy(t, port, true)
+
+	if got := roundTrip(t, p, postRequest("/v1/responses?x=1", `{"model":"gemini-3.1-pro-preview","input":[]}`)); string(got) != response {
+		t.Fatalf("client bytes differ from upstream bytes: %q", got)
+	}
+	if line, _, _ := strings.Cut(<-requests, "\r\n"); line != "POST /v1/chat/completions?x=1 HTTP/1.1" {
+		t.Fatalf("backend request line = %q", line)
+	}
+	expectFields(t, onlyRecord(t, journalRecords(t, p, j)), map[string]any{
+		"endpoint": "/v1/responses", "forwarded_endpoint": "/v1/chat/completions",
+		"requested_model": "gemini-3.1-pro-preview", "outcome": "complete",
+	})
+}
+
 func TestJournalRecordsDialFailure(t *testing.T) {
 	isolateHome(t)
 	p, j := journalProxy(t, freePort(t), true)

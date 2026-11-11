@@ -486,7 +486,7 @@ func (r *response) framingEnded() {
 	if obj == nil {
 		return
 	}
-	r.noteModel(obj)
+	r.noteModel(obj, objectOf(obj["response"]))
 	switch {
 	case r.envelope == envelopeAnthropic && jsonStringOr(obj["type"]) == "message":
 		r.tokens = anthropicTokens(objectOf(obj["usage"]))
@@ -579,12 +579,13 @@ func (r *response) sseFieldLine(line []byte) {
 // sseDispatch applies one dispatched SSE event.
 func (r *response) sseDispatch() {
 	done := string(r.sseData) == "[DONE]"
-	var obj map[string]json.RawMessage
+	var obj, inner map[string]json.RawMessage
 	if !done {
 		obj = strictObject(r.sseData)
 	}
 	if obj != nil {
-		r.noteModel(obj)
+		inner = objectOf(obj["response"])
+		r.noteModel(obj, inner)
 	}
 	switch {
 	case r.sseEventName == "error":
@@ -610,7 +611,7 @@ func (r *response) sseDispatch() {
 		r.completed = true
 	case "response.completed", "response.incomplete":
 		if r.sseFamily == envelopeResponses {
-			r.tokens = responsesTokens(objectOf(obj["response"])["usage"])
+			r.tokens = responsesTokens(inner["usage"])
 		}
 		r.completed = true
 	default:
@@ -670,12 +671,13 @@ func (r *response) chatChunk(obj map[string]json.RawMessage) {
 }
 
 // noteModel keeps the last explicit nonempty model a payload reports, at
-// top-level model, message.model, or response.model in that order.
-func (r *response) noteModel(obj map[string]json.RawMessage) {
+// top-level model, message.model, or response.model in that order. inner is
+// the payload's decoded response member.
+func (r *response) noteModel(obj, inner map[string]json.RawMessage) {
 	for _, m := range []string{
 		jsonStringOr(obj["model"]),
 		jsonStringOr(objectOf(obj["message"])["model"]),
-		jsonStringOr(objectOf(obj["response"])["model"]),
+		jsonStringOr(inner["model"]),
 	} {
 		if m != "" {
 			r.model = m
