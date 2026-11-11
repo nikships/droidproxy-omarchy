@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 type goldenCase struct {
@@ -107,10 +108,13 @@ func TestTranscriptFixtures(t *testing.T) {
 				Endpoint string         `json:"endpoint"`
 				Headers  map[string]any `json:"headers"`
 				Body     map[string]any `json:"body"`
+				BodyRaw  *string        `json:"body_raw"`
 			} `json:"request"`
-			Response      string          `json:"response"`
-			BodyReadError bool            `json:"body_read_error"`
-			Expect        json.RawMessage `json:"expect"`
+			Observation     *transcriptObservation `json:"observation"`
+			Response        string                 `json:"response"`
+			BodyReadError   bool                   `json:"body_read_error"`
+			NonstandardWire string                 `json:"nonstandard_wire"`
+			Expect          json.RawMessage        `json:"expect"`
 		} `json:"cases"`
 	}
 	if err := json.Unmarshal(data, &transcripts); err != nil {
@@ -129,6 +133,39 @@ func TestTranscriptFixtures(t *testing.T) {
 			"session_metadata_json_malformed",
 			"session_metadata_json_bad_grammar",
 			"session_metadata_legacy_suffix",
+			"chat_sse_bytes_after_done",
+			"partial_head_after_429_status",
+			"head_over_64k",
+			"header_line_without_colon",
+			"chunk_size_line_bare_lf",
+			"transfer_encoding_gzip_chunked",
+			"sse_event_error_field",
+			"chat_sse_untyped_top_level_error",
+			"chat_sse_null_optional_counters",
+			"anthropic_json_unrecognized_envelope",
+			"anthropic_json_trailing_comma",
+			"request_body_trailing_comma",
+			"sse_overlong_line_skipped",
+			"sse_multiline_event_over_line_cap",
+			"chat_sse_finish_usage_then_eof",
+			"anthropic_sse_late_cache_delta",
+			"trace_index_uppercase",
+			"anthropic_sse_delta_model",
+			"anthropic_json_max_counter",
+			"anthropic_json_fractional_counter",
+			"client_write_fails_before_done",
+			"client_write_fails_on_last_byte",
+			"status_line_without_reason",
+			"status_line_reason_without_space",
+			"chat_cache_write_null_uses_cached_creation",
+			"chat_null_finish_usage_then_eof",
+			"request_body_duplicate_model",
+			"response_model_three_locations",
+			"status_code_out_of_range",
+			"close_delimited_sse_usage_then_eof",
+			"event_message_stop_with_ping_payload",
+			"sse_line_exactly_at_cap",
+			"sse_line_one_over_cap",
 		} {
 			if !seen[name] {
 				t.Errorf("required transcript %q is missing", name)
@@ -155,8 +192,11 @@ func TestTranscriptFixtures(t *testing.T) {
 			if !reflect.DeepEqual(expected, record) {
 				t.Fatal("transcript expected record differs from its golden")
 			}
-			if entry.Request == nil || entry.Request.Method != "POST" || entry.Request.Headers == nil || entry.Request.Body == nil {
-				t.Fatal("transcript requires a POST request with headers and body objects")
+			if entry.Request == nil || entry.Request.Method != "POST" || entry.Request.Headers == nil {
+				t.Fatal("transcript requires a POST request with a headers object")
+			}
+			if (entry.Request.Body == nil) == (entry.Request.BodyRaw == nil) {
+				t.Fatal("transcript request needs exactly one of body and body_raw")
 			}
 			if endpoint := expected.(map[string]any)["endpoint"]; endpoint != entry.Request.Endpoint {
 				t.Fatalf("request endpoint %q differs from expected endpoint %v", entry.Request.Endpoint, endpoint)
@@ -167,6 +207,13 @@ func TestTranscriptFixtures(t *testing.T) {
 					t.Fatal("response contains a non-Latin-1 code point")
 				}
 				wire = append(wire, byte(r))
+			}
+			checkObservation(t, entry.Observation, wire)
+			if entry.NonstandardWire != "" {
+				if !bytes.HasPrefix(wire, []byte("HTTP/1.")) {
+					t.Fatal("nonstandard fixture must still start with an HTTP/1.x status line")
+				}
+				return
 			}
 			response, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(wire)), nil)
 			if err != nil {
@@ -185,5 +232,45 @@ func TestTranscriptFixtures(t *testing.T) {
 				t.Fatal("HTTP fixture lacks CRLF head separator")
 			}
 		})
+	}
+}
+
+type transcriptObservation struct {
+	StartedAt          string `json:"started_at"`
+	EndedAt            string `json:"ended_at"`
+	FirstBodyElapsedMS *int64 `json:"first_body_elapsed_ms"`
+	EndSignal          string `json:"end_signal"`
+	EndSignalElapsedMS *int64 `json:"end_signal_elapsed_ms"`
+	ClientWriteFailsAt *int   `json:"client_write_fails_at"`
+}
+
+func checkObservation(t *testing.T, o *transcriptObservation, wire []byte) {
+	t.Helper()
+	if o == nil || o.FirstBodyElapsedMS == nil {
+		t.Fatal("transcript requires an observation with first_body_elapsed_ms")
+	}
+	started, err := time.Parse(time.RFC3339Nano, o.StartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended, err := time.Parse(time.RFC3339Nano, o.EndedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.EndSignalElapsedMS != nil && time.Duration(*o.EndSignalElapsedMS)*time.Millisecond < ended.Sub(started) {
+		t.Fatal("end signal cannot arrive before ended_at")
+	}
+	switch o.EndSignal {
+	case "eof":
+		if o.ClientWriteFailsAt != nil {
+			t.Fatal("client_write_fails_at requires end_signal client_write_failed")
+		}
+	case "client_write_failed":
+		head := bytes.Index(wire, []byte("\r\n\r\n"))
+		if o.ClientWriteFailsAt == nil || head < 0 || *o.ClientWriteFailsAt < head+4 || *o.ClientWriteFailsAt >= len(wire) {
+			t.Fatal("client_write_fails_at must be a response offset after the head terminator")
+		}
+	default:
+		t.Fatalf("unknown end_signal %q", o.EndSignal)
 	}
 }
