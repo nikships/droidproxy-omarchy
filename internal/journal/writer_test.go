@@ -204,6 +204,28 @@ func TestWriterQueueOverflowDropsWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestWriterEnqueueDuringCloseDropsWithoutWaiting(t *testing.T) {
+	w := newRecordWriter(t.TempDir(), 2)
+	w.mu.Lock()
+	returned := make(chan struct{})
+	go func() {
+		w.enqueue(queued(testRecord("2026-11-11T10:00:00.000Z", "")))
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		w.mu.Unlock()
+		<-returned
+		t.Fatal("enqueue waited for close")
+	}
+	w.mu.Unlock()
+	if w.dropped.Load() != 1 || w.accepted.Load() != 0 {
+		t.Fatalf("dropped = %d, accepted = %d; want 1, 0", w.dropped.Load(), w.accepted.Load())
+	}
+	w.close()
+}
+
 // queued is rec as the writer receives it from a finalized observation
 // whose request fields are already known.
 func queued(rec Record) pending { return pending{rec: rec} }

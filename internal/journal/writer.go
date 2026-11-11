@@ -92,9 +92,13 @@ func newRecordWriter(dir string, queueSize int) *recordWriter {
 }
 
 // enqueue queues a finalized record for appending to its started_at month
-// file.
+// file. It never waits: a record that arrives while close holds the lock is
+// dropped, as it would be once close finishes.
 func (w *recordWriter) enqueue(p pending) {
-	w.mu.RLock()
+	if !w.mu.TryRLock() {
+		w.dropped.Add(1)
+		return
+	}
 	defer w.mu.RUnlock()
 	if w.closed {
 		w.dropped.Add(1)
