@@ -1,6 +1,13 @@
 package journal
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+)
+
+// parseBacklogLimit bounds the bytes of request bodies waiting for their
+// background parse, since each body stays in memory until its parse ends.
+const parseBacklogLimit = 64 << 20
 
 // End is how the relay stopped.
 type End int
@@ -29,6 +36,8 @@ type Journal struct {
 	enabled func() bool
 	seats   *seatIndex
 	writer  *recordWriter
+	// parsing is the bytes of admitted request bodies whose parse has not ended.
+	parsing atomic.Int64
 }
 
 // New returns a journal writing to dir and resolving seats in authDir.
@@ -57,8 +66,9 @@ func (j *Journal) Close() {
 }
 
 // Begin returns an observation for a POST to an admitted inference path, or
-// nil when the journal is off or the request is not journaled. All
-// Observation methods accept nil.
+// nil when the journal is off or the request is not journaled. It also
+// returns nil, counting a dropped record, when the request bodies still
+// waiting for their parse fill the backlog. All Observation methods accept nil.
 func (j *Journal) Begin(ctx RequestContext) *Observation {
 	if j == nil || ctx.Method != "POST" || !admitted(stripQuery(ctx.ForwardedPath)) || !j.enabled() {
 		return nil
@@ -67,6 +77,11 @@ func (j *Journal) Begin(ctx RequestContext) *Observation {
 }
 
 func (j *Journal) begin(ctx RequestContext, now time.Time) *Observation {
+	size := int64(len(ctx.Body))
+	if !j.admitParse(size) {
+		j.writer.dropped.Add(1)
+		return nil
+	}
 	headers := parseHeaderLines(ctx.Head)
 	o := &Observation{
 		journal:  j,
@@ -83,8 +98,22 @@ func (j *Journal) begin(ctx RequestContext, now time.Time) *Observation {
 	if isPrimer(headers) {
 		o.origin = "primer"
 	}
-	o.request = readRequest(o.endpoint, headers, ctx.Body)
+	o.request = readRequest(o.endpoint, headers, ctx.Body, func() { j.parsing.Add(-size) })
 	return o
+}
+
+// admitParse reserves size bytes of the parse backlog without waiting. A body
+// larger than the whole backlog is admitted only when no other body is waiting.
+func (j *Journal) admitParse(size int64) bool {
+	for {
+		waiting := j.parsing.Load()
+		if waiting != 0 && waiting+size > parseBacklogLimit {
+			return false
+		}
+		if j.parsing.CompareAndSwap(waiting, waiting+size) {
+			return true
+		}
+	}
 }
 
 // Observation follows one relayed request. It is used from the relay
