@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -165,7 +164,7 @@ func (s *seatIndex) stillBound(index string, b seatBinding, now time.Time) bool 
 	if fp, bindable, err := lstatEntry(b.path); err != nil || fp != b.fp || !bindable {
 		return false
 	}
-	f, err := os.OpenFile(b.path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	f, err := openFileNoFollow(b.path, os.O_RDONLY, 0, true)
 	if err != nil {
 		return false
 	}
@@ -212,11 +211,12 @@ func readSeatEntry(path string) (seatEntry, string, bool) {
 	if !regular && info.Mode()&fs.ModeSymlink == 0 {
 		return seatEntry{}, "", false
 	}
-	flags := os.O_RDONLY | syscall.O_NONBLOCK | syscall.O_CLOEXEC
+	var f *os.File
 	if regular {
-		flags |= syscall.O_NOFOLLOW
+		f, err = openFileNoFollow(path, os.O_RDONLY, 0, true)
+	} else {
+		f, err = openFilePlain(path, os.O_RDONLY, 0, true)
 	}
-	f, err := os.OpenFile(path, flags, 0)
 	if err != nil {
 		return seatEntry{}, "", false
 	}
@@ -242,7 +242,7 @@ func readSeatEntry(path string) (seatEntry, string, bool) {
 	entry := seatEntry{
 		path:     path,
 		fp:       before,
-		bindable: regular && ownedByMe(info) && err == nil && after == before,
+		bindable: regular && ownedByMe(path, info) && err == nil && after == before,
 	}
 	if name := filepath.Base(path); seatFilePattern.MatchString(name) {
 		entry.id.file = name
@@ -261,11 +261,6 @@ func readSeatEntry(path string) (seatEntry, string, bool) {
 	return entry, authType, true
 }
 
-func ownedByMe(info fs.FileInfo) bool {
-	st, ok := info.Sys().(*syscall.Stat_t)
-	return ok && int(st.Uid) == os.Getuid()
-}
-
 // lstatEntry returns path's fingerprint and whether it is a regular file
 // owned by this user. Ownership is not part of the fingerprint, since a
 // chown changes neither size, mtime nor inode.
@@ -274,7 +269,7 @@ func lstatEntry(path string) (fingerprint, bool, error) {
 	if err != nil {
 		return fingerprint{}, false, err
 	}
-	return fingerprintOf(info), info.Mode().IsRegular() && ownedByMe(info), nil
+	return fingerprintOf(info), info.Mode().IsRegular() && ownedByMe(path, info), nil
 }
 
 func lstatFingerprint(path string) (fingerprint, error) {
@@ -286,11 +281,7 @@ func lstatFingerprint(path string) (fingerprint, error) {
 }
 
 func fingerprintOf(info fs.FileInfo) fingerprint {
-	fp := fingerprint{size: info.Size(), mtime: info.ModTime().UnixNano()}
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		fp.inode = uint64(st.Ino)
-	}
-	return fp
+	return fingerprint{size: info.Size(), mtime: info.ModTime().UnixNano(), inode: fileInode(info)}
 }
 
 // objectMembers returns the raw values of the named top-level members of a
