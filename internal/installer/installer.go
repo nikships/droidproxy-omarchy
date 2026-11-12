@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -45,6 +46,9 @@ const desktopFileName = "droidproxy.desktop"
 // under the user's ~/.config/omarchy/plugins and enabled through Omarchy's
 // own commands.
 func Install(opts Options) error {
+	if runtime.GOOS == "windows" {
+		return errors.New("installer: the DroidProxy app manages installation on Windows")
+	}
 	from := opts.From
 	if from == "" {
 		from = paths.ResourceRoot()
@@ -136,6 +140,9 @@ func Install(opts Options) error {
 // the user's DroidProxy data and CLIProxyAPI credentials; otherwise those
 // are kept and reported.
 func Uninstall(purge bool) error {
+	if runtime.GOOS == "windows" {
+		return errors.New("installer: the DroidProxy app manages installation on Windows")
+	}
 	disablePlugin() // best effort: the shell may not be running
 	if err := os.RemoveAll(filepath.Join(paths.OmarchyPluginsDir(), buildinfo.PluginID)); err != nil {
 		logx.Logf("[Uninstall] plugin dir: %v", err)

@@ -9,6 +9,7 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 )
 
@@ -135,7 +136,13 @@ func ResourceRoot() string {
 }
 
 // BundledCLIProxyAPI is the bundled CLIProxyAPI binary.
-func BundledCLIProxyAPI() string { return filepath.Join(ResourceRoot(), "libexec", "cli-proxy-api") }
+func BundledCLIProxyAPI() string {
+	name := "cli-proxy-api"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(ResourceRoot(), "libexec", name)
+}
 
 // BundledConfigPath is the bundled CLIProxyAPI config template.
 func BundledConfigPath() string { return filepath.Join(ResourceRoot(), "share", "config.yaml") }

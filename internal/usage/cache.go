@@ -64,11 +64,12 @@ type cacheFlight struct {
 }
 
 const (
-	claudeUsageInterval = 300 * time.Second
-	metaUsageInterval   = 60 * time.Second
-	otherUsageInterval  = 15 * time.Second
-	maxRateLimitBackoff = time.Hour
-	maxRateLimitStreak  = 5
+	claudeUsageInterval      = 300 * time.Second
+	metaUsageInterval        = 60 * time.Second
+	antigravityUsageInterval = 60 * time.Second
+	otherUsageInterval       = 15 * time.Second
+	maxRateLimitBackoff      = time.Hour
+	maxRateLimitStreak       = 5
 )
 
 func newUsageCache(path string, now func() time.Time, jitter func() time.Duration) *usageCache {
@@ -155,6 +156,8 @@ func (c *usageCache) usage(account auth.Account, fetch func() AccountUsage) Acco
 		// Matches the probe's own 60s freshness window, and gives a failed
 		// probe a cooldown instead of an immediate retry on the next poll.
 		interval = metaUsageInterval
+	case auth.Antigravity:
+		interval = antigravityUsageInterval
 	}
 	// Persist the reservation before fetching so a restart cannot retry it.
 	entry, ok := c.entries[key]

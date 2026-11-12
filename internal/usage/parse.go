@@ -71,6 +71,94 @@ func ParseClaudeWindows(data []byte) []Window {
 // (cli-chat-proxy.grok.com/v1/billing?format=credits). SuperGrok reports one
 // window per billing period: creditUsagePercent when present, otherwise
 // onDemandUsed/onDemandCap. The title comes from currentPeriod.type.
+// ParseAntigravityQuotaSummaryWindows reads Google Cloud Code's
+// retrieveUserQuotaSummary response: quota pools (Gemini Models,
+// Claude and GPT models), each with five-hour and weekly buckets
+// carrying a remainingFraction and resetTime. Windows come back
+// shortest-first per pool, matching the other parsers.
+func ParseAntigravityQuotaSummaryWindows(data []byte) []Window {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	groups, ok := raw["groups"].([]any)
+	if !ok {
+		return nil
+	}
+
+	periodRank := func(bucket map[string]any) int {
+		name := strings.ToLower(stringValue(bucket["displayName"]))
+		switch {
+		case strings.Contains(name, "five") || strings.Contains(name, "5-hour") || strings.Contains(name, "5h"):
+			return 0
+		case strings.Contains(name, "week"):
+			return 1
+		default:
+			return 2
+		}
+	}
+	periodTitle := func(bucket map[string]any) (string, int) {
+		name := strings.TrimSpace(stringValue(bucket["displayName"]))
+		switch periodRank(bucket) {
+		case 0:
+			return "5-hour", 5 * 3600
+		case 1:
+			return "Weekly", 7 * 24 * 3600
+		default:
+			return strings.TrimSpace(strings.ReplaceAll(name, " Limit Remaining", "")), 0
+		}
+	}
+	groupTitle := func(group map[string]any) string {
+		name := strings.TrimSpace(stringValue(group["displayName"]))
+		lower := strings.ToLower(name)
+		switch {
+		case strings.Contains(lower, "gemini"):
+			return "Gemini"
+		case strings.Contains(lower, "claude") && strings.Contains(lower, "gpt"):
+			return "Claude/GPT"
+		default:
+			return strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(name, " Models"), " models"))
+		}
+	}
+
+	var windows []Window
+	for _, g := range groups {
+		group, ok := g.(map[string]any)
+		if !ok {
+			continue
+		}
+		rawBuckets, _ := group["buckets"].([]any)
+		buckets := make([]map[string]any, 0, len(rawBuckets))
+		for _, b := range rawBuckets {
+			if bucket, ok := b.(map[string]any); ok {
+				buckets = append(buckets, bucket)
+			}
+		}
+		sort.SliceStable(buckets, func(i, j int) bool {
+			return periodRank(buckets[i]) < periodRank(buckets[j])
+		})
+		for _, bucket := range buckets {
+			fraction, ok := numberValue(bucket["remainingFraction"])
+			if !ok {
+				continue
+			}
+			remaining := math.Max(0, math.Min(1, fraction))
+			used := (1 - remaining) * 100
+			title, lengthSeconds := periodTitle(bucket)
+			resetStr := stringValue(bucket["resetTime"])
+			resetDate := parseISO8601Date(resetStr)
+			resetText := resetStr
+			if resetDate != nil {
+				resetText = ResetTextFor(*resetDate)
+			}
+			w := newWindow(groupTitle(group)+" "+title, &used, resetText, resetDate)
+			w.LengthSeconds = lengthSeconds
+			windows = append(windows, w)
+		}
+	}
+	return windows
+}
+
 func ParseGrokWindows(data []byte) []Window {
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -420,6 +508,13 @@ func plural(n int, unit string) string {
 		return "1 " + unit
 	}
 	return fmt.Sprintf("%d %ss", n, unit)
+}
+
+func stringValue(value any) string {
+	if s, ok := value.(string); ok {
+		return s
+	}
+	return ""
 }
 
 func numberValue(value any) (float64, bool) {

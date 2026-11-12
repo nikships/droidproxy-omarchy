@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -76,34 +77,6 @@ func run(ctx context.Context, timeout time.Duration, name string, args ...string
 // OpenURL opens url in the default browser via xdg-open.
 func OpenURL(url string) error { return OpenPath(url) }
 
-// OpenPath opens path (a file, folder, or URL) with xdg-open, detached so a
-// slow launcher cannot stall the daemon.
-func OpenPath(path string) error {
-	if path == "" {
-		return errors.New("desktop: nothing to open")
-	}
-	return Default.StartDetached("xdg-open", path)
-}
-
-// CopyToClipboard copies text using wl-copy, falling back to xclip when
-// wl-copy is missing (X11 sessions).
-func CopyToClipboard(text string) error {
-	if _, err := Default.LookPath("wl-copy"); err == nil {
-		return copyWith("wl-copy", text)
-	}
-	if _, err := Default.LookPath("xclip"); err == nil {
-		return copyWith("xclip", "-selection", "clipboard", text)
-	}
-	return errors.New("desktop: no clipboard tool found (install wl-copy or xclip)")
-}
-
-func copyWith(name string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := Default.Run(ctx, name, args...)
-	return err
-}
-
 // ---- systemd user service helpers ------------------------------------------
 
 // ServiceUnit is the user unit DroidProxy installs and controls.
@@ -115,12 +88,18 @@ var ErrNotUnderSystemd = errors.New("desktop: not running under systemd")
 
 // Systemctl runs systemctl --user with args and returns its output.
 func Systemctl(ctx context.Context, args ...string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return "", ErrNotUnderSystemd
+	}
 	return run(ctx, 30*time.Second, "systemctl", append([]string{"--user"}, args...)...)
 }
 
 // SystemctlNoBlock runs systemctl --user --no-block (used for restart so the
 // daemon is not killed while being the caller).
 func SystemctlNoBlock(ctx context.Context, args ...string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return "", ErrNotUnderSystemd
+	}
 	return run(ctx, 30*time.Second, "systemctl", append([]string{"--user", "--no-block"}, args...)...)
 }
 
