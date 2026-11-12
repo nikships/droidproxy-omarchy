@@ -2,6 +2,7 @@ package journal
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -173,6 +174,73 @@ func TestRequestBodyWithInvalidUTF8IsNotStrict(t *testing.T) {
 		if !c.strict && (model != "" || session != "" || rec.Provider != "openai") {
 			t.Errorf("%s: model=%q session=%q provider=%s, want a non-strict body", c.name, model, session, rec.Provider)
 		}
+	}
+}
+
+// Each admitted request body stays in memory until its background parse
+// ends, so the bytes still waiting for a parse are bounded.
+func TestParseBacklogIsBoundedAndDropsAreCounted(t *testing.T) {
+	j := New(filepath.Join(t.TempDir(), "journal"), t.TempDir(), func() bool { return true })
+	t.Cleanup(j.Close)
+	body := func(size int) string {
+		prefix, suffix := `{"model":"claude-fixture","messages":[{"role":"user","content":"`, `"}]}`
+		return prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix
+	}
+	parsing := func(o *Observation) bool {
+		select {
+		case <-o.request.done:
+			return false
+		default:
+			return true
+		}
+	}
+	const n, size, backlog = 20, 5_000_000, 64 << 20
+	small := body(size)
+	drops := 0
+	var admitted []*Observation
+	for range n {
+		if o := j.Begin(requestFor("/v1/messages", small)); o != nil {
+			admitted = append(admitted, o)
+		} else {
+			drops++
+		}
+	}
+	waiting := 0
+	for _, o := range admitted {
+		if parsing(o) {
+			waiting += size
+		}
+	}
+	if len(admitted) == 0 || waiting > backlog {
+		t.Errorf("%d of %d bodies admitted with %d bytes still waiting for a parse; want at most %d bytes", len(admitted), n, waiting, backlog)
+	}
+	for _, o := range admitted {
+		<-o.request.done
+	}
+
+	// A body larger than the whole backlog is admitted once every earlier
+	// parse has released its bytes, and no other body is admitted while it waits.
+	huge := body(backlog + 1)
+	deadline := time.Now().Add(5 * time.Second)
+	large := j.Begin(requestFor("/v1/messages", huge))
+	for ; large == nil; large = j.Begin(requestFor("/v1/messages", huge)) {
+		drops++
+		if time.Now().After(deadline) {
+			t.Fatal("a body over the backlog was never admitted after every parse ended")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if next := j.Begin(requestFor("/v1/messages", small)); next == nil {
+		drops++
+	} else {
+		if parsing(large) {
+			t.Error("a body was admitted while a body over the backlog was waiting for its parse")
+		}
+		<-next.request.done
+	}
+	<-large.request.done
+	if got := j.writer.dropped.Load(); got != uint64(drops) {
+		t.Errorf("dropped = %d, want %d (one per request not observed)", got, drops)
 	}
 }
 

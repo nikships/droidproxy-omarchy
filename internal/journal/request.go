@@ -185,7 +185,7 @@ func metadataSessionID(userID string) (string, bool) {
 
 // requestFacts are the record fields read from the request. The body is
 // parsed on its own goroutine so the relay never waits for it; done is
-// closed once the fields are set.
+// closed once the fields are set, and parsed runs after that.
 type requestFacts struct {
 	done     chan struct{}
 	model    *string
@@ -193,9 +193,10 @@ type requestFacts struct {
 	session  *string
 }
 
-func readRequest(endpoint string, headers [][2]string, body string) *requestFacts {
+func readRequest(endpoint string, headers [][2]string, body string, parsed func()) *requestFacts {
 	f := &requestFacts{done: make(chan struct{})}
 	go func() {
+		defer parsed()
 		defer close(f.done)
 		obj := strictObject([]byte(body))
 		f.model = requestedModel(endpoint, obj)
