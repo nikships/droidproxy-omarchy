@@ -277,6 +277,9 @@ func Definitions() []ModelDefinition {
 		// registry listed it; the account-gated -high id answers live
 		// (verified 2026-11-09) and reasoning_effort selects the level.
 		antigravityModel("gemini-4-carbon-high", "gemini-4-carbon-high", "Gemini 4 Carbon", 262144, 0, []ThinkingLevel{levelLow, levelMedium, levelHigh}, ""),
+		// Hydrogen is registered for Antigravity in CLIProxyAPI 8.0.68+ only
+		// as the -xhigh id, which accepts low through xhigh.
+		antigravityModel("gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-xhigh", "Gemini 4 Hydrogen", 0, 0, []ThinkingLevel{levelLow, levelMedium, levelHigh, levelXHigh}, "xhigh"),
 		// Claude 5.5 is only served to directly billed (non-trial) Google AI
 		// Pro/Ultra accounts. CLIProxyAPI registers an Antigravity model only when
 		// the account's fetchAvailableModels returns it, so on other accounts the
