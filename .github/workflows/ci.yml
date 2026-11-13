@@ -38,6 +38,8 @@ jobs:
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -o /tmp/droidproxy-$arch ./cmd/droidproxy
           done
+          # The daemon is also the Windows app's backend; keep it buildable.
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /tmp/droidproxy-windows-amd64.exe ./cmd/droidproxy
 
       - name: Shell scripts
         run: |

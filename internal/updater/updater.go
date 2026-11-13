@@ -221,6 +221,9 @@ func (u *Updater) Check(ctx context.Context) error {
 // and restarts. It is a no-op when nothing is available or an install is
 // already running.
 func (u *Updater) Install(ctx context.Context) error {
+	if runtime.GOOS == "windows" {
+		return errors.New("updater: the DroidProxy app manages updates on Windows")
+	}
 	u.mu.Lock()
 	if u.installing || u.state != control.UpdateAvailable {
 		state := u.state

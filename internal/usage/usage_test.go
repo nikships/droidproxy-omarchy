@@ -111,6 +111,59 @@ func TestParseClaudeWindowsHandlesEdgeCases(t *testing.T) {
 	}
 }
 
+func TestParseAntigravityQuotaSummaryWindowsReadsPoolsShortestFirst(t *testing.T) {
+	payload := `{"groups":[
+	  {"displayName":"Gemini Models","buckets":[
+	    {"displayName":"Weekly Limit Remaining","remainingFraction":0.92,"resetTime":"2026-11-14T18:37:17Z"},
+	    {"displayName":"Five Hour Limit Remaining","remainingFraction":0.975,"resetTime":"2026-11-09T17:37:15Z"}
+	  ]},
+	  {"displayName":"Claude and GPT models","buckets":[
+	    {"displayName":"Weekly Limit Remaining","remainingFraction":1,"resetTime":"2026-11-16T12:53:47Z"},
+	    {"displayName":"Five Hour Limit Remaining","remainingFraction":0.8,"resetTime":"2026-11-09T17:53:47Z"}
+	  ]}
+	]}`
+
+	windows := ParseAntigravityQuotaSummaryWindows([]byte(payload))
+
+	var titles []string
+	for _, w := range windows {
+		titles = append(titles, w.Title)
+	}
+	want := []string{"Gemini 5-hour", "Gemini Weekly", "Claude/GPT 5-hour", "Claude/GPT Weekly"}
+	if strings.Join(titles, ",") != strings.Join(want, ",") {
+		t.Fatalf("titles = %v, want %v", titles, want)
+	}
+	first := windows[0]
+	near := func(got *float64, want float64) bool {
+		if got == nil {
+			return false
+		}
+		diff := *got - want
+		return diff > -1e-9 && diff < 1e-9
+	}
+	if !near(first.UsedPercent, 2.5) {
+		t.Fatalf("first used = %v", first.UsedPercent)
+	}
+	if !near(first.RemainingPercent, 97.5) {
+		t.Fatalf("first remaining = %v", first.RemainingPercent)
+	}
+	if first.ResetDate == nil {
+		t.Fatal("first resetDate = nil")
+	}
+	if first.LengthSeconds != 5*3600 {
+		t.Fatalf("first lengthSeconds = %d", first.LengthSeconds)
+	}
+	if last := windows[len(windows)-1]; last.RemainingPercent == nil || *last.RemainingPercent != 100 {
+		t.Fatalf("last remaining = %v", last.RemainingPercent)
+	}
+}
+
+func TestParseAntigravityQuotaSummaryWindowsHandlesMalformedJSON(t *testing.T) {
+	if windows := ParseAntigravityQuotaSummaryWindows([]byte("{ invalid json")); len(windows) != 0 {
+		t.Fatalf("windows = %v", windows)
+	}
+}
+
 func TestParseClaudeWindowsHandlesMalformedJSON(t *testing.T) {
 	if windows := ParseClaudeWindows([]byte("{ invalid json")); len(windows) != 0 {
 		t.Fatalf("windows = %v", windows)

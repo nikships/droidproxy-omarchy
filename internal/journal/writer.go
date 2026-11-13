@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/nikships/droidproxy-omarchy/internal/logx"
@@ -319,6 +319,11 @@ func appendLine(dir, month string, line []byte, stop <-chan struct{}, start func
 	if removed, err = repairTornTail(f); err != nil {
 		return removed, err
 	}
+	// Windows opens the file without append-only rights so the repair above
+	// can truncate; seek to the end so the line lands there either way.
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return removed, err
+	}
 	// os.File.Write retries short writes until the whole line is written or
 	// an error occurs; a partial line left by an error is repaired next time.
 	if _, err := f.Write(line); err != nil {
@@ -338,11 +343,11 @@ func appendLine(dir, month string, line []byte, stop <-chan struct{}, start func
 func lockWithin(f *os.File, limit time.Duration, stop <-chan struct{}) error {
 	deadline := time.Now().Add(limit)
 	for delay := time.Millisecond; ; delay = min(2*delay, 50*time.Millisecond) {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := tryFlock(f)
 		if err == nil {
 			return nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+		if !lockBusy(err) {
 			return err
 		}
 		if time.Now().After(deadline) {
@@ -367,7 +372,7 @@ func ensurePrivateDir(dir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("%s is not a directory", dir)
 	}
-	if err := checkOwner(info); err != nil {
+	if err := checkOwner(dir, info); err != nil {
 		return err
 	}
 	if info.Mode().Perm() != 0o700 {
@@ -379,11 +384,11 @@ func ensurePrivateDir(dir string) error {
 // openJournalFile opens path for appending without following a symlink and
 // checks that it is a regular file owned by this user.
 func openJournalFile(path string) (*os.File, bool, error) {
-	flags := os.O_RDWR | os.O_APPEND | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
-	f, err := os.OpenFile(path, flags|os.O_CREATE|os.O_EXCL, 0o600)
+	flags := os.O_RDWR | os.O_APPEND
+	f, err := openFileNoFollow(path, flags|os.O_CREATE|os.O_EXCL, 0o600, false)
 	created := err == nil
 	if errors.Is(err, fs.ErrExist) {
-		f, err = os.OpenFile(path, flags, 0)
+		f, err = openFileNoFollow(path, flags, 0, false)
 	}
 	if err != nil {
 		return nil, false, err
@@ -393,7 +398,7 @@ func openJournalFile(path string) (*os.File, bool, error) {
 		err = fmt.Errorf("%s is not a regular file", path)
 	}
 	if err == nil {
-		err = checkOwner(info)
+		err = checkOwner(path, info)
 	}
 	if err == nil && info.Mode().Perm() != 0o600 {
 		err = f.Chmod(0o600)
@@ -403,14 +408,6 @@ func openJournalFile(path string) (*os.File, bool, error) {
 		return nil, false, err
 	}
 	return f, created, nil
-}
-
-func checkOwner(info fs.FileInfo) error {
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || int(st.Uid) != os.Getuid() {
-		return fmt.Errorf("%s is not owned by this user", info.Name())
-	}
-	return nil
 }
 
 // repairTornTail truncates an incomplete last line left by a crash

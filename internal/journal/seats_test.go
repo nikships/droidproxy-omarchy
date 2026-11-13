@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -159,9 +158,7 @@ func TestSeatIndexFileRules(t *testing.T) {
 	backslash := writeAuthFile(t, dir, `claude-back\slash.json`, identity)
 	bare := writeAuthFile(t, dir, ".json", identity)
 	fifo := filepath.Join(dir, "claude-fifo.json")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	mkfifo(t, fifo)
 	j := &Journal{enabled: func() bool { return true }, seats: newSeatIndex(dir)}
 
 	only := func(path string) Seat { return Seat{AuthIndex: authIndex("claude", path), Role: roleServed} }
@@ -384,9 +381,7 @@ func TestNonRegularEntriesAreNotIndexed(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	regular := writeAuthFile(t, dir, "claude-regular.json", map[string]any{"type": "claude"})
 	fifo := filepath.Join(dir, "f.json")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	mkfifo(t, fifo)
 	socket := filepath.Join(dir, "s.json")
 	l, err := net.Listen("unix", socket)
 	if err != nil {

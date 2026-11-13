@@ -27,10 +27,15 @@ import (
 const (
 	requestTimeout = 15 * time.Second
 
-	codexUsageEndpoint  = "https://chatgpt.com/backend-api/wham/usage"
-	claudeUsageEndpoint = "https://api.anthropic.com/api/oauth/usage"
-	claudeTokenEndpoint = "https://platform.claude.com/v1/oauth/token"
-	grokUsageEndpoint   = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+	codexUsageEndpoint       = "https://chatgpt.com/backend-api/wham/usage"
+	claudeUsageEndpoint      = "https://api.anthropic.com/api/oauth/usage"
+	claudeTokenEndpoint      = "https://platform.claude.com/v1/oauth/token"
+	grokUsageEndpoint        = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+	antigravityUsageEndpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+
+	// The Antigravity Hub client identity CLIProxyAPI sends; Cloud Code
+	// rejects some model calls from older client versions.
+	antigravityUserAgent = "antigravity/hub/2.29.0 (aidev_client; os_type=darwin; arch=arm64; cl=1013060670)"
 
 	// Public OAuth client id of the Claude CLI, same as the macOS app.
 	claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -45,11 +50,12 @@ type Tracker struct {
 	generation int
 	onChange   func()
 
-	client         *http.Client
-	codexUsageURL  string
-	claudeUsageURL string
-	claudeTokenURL string
-	grokUsageURL   string
+	client              *http.Client
+	codexUsageURL       string
+	claudeUsageURL      string
+	claudeTokenURL      string
+	grokUsageURL        string
+	antigravityUsageURL string
 
 	// grokToken resolves the SuperGrok bearer. Defaults to grok.AccessToken;
 	// tests inject a stub so no refresh is attempted.
@@ -67,14 +73,15 @@ type Tracker struct {
 // NewTracker creates a tracker with the default HTTP client and endpoints.
 func NewTracker() *Tracker {
 	return &Tracker{
-		client:         &http.Client{Timeout: requestTimeout},
-		codexUsageURL:  codexUsageEndpoint,
-		claudeUsageURL: claudeUsageEndpoint,
-		claudeTokenURL: claudeTokenEndpoint,
-		grokUsageURL:   grokUsageEndpoint,
-		grokToken:      grok.AccessToken,
-		metaSnapshots:  func(accountID string) *meta.UsageSnapshot { return meta.SharedUsageStore().Snapshot(accountID) },
-		probeMeta:      func(accountID string) meta.ProbeOutcome { return meta.NewUsageProber().Probe(accountID, false) },
+		client:              &http.Client{Timeout: requestTimeout},
+		codexUsageURL:       codexUsageEndpoint,
+		claudeUsageURL:      claudeUsageEndpoint,
+		claudeTokenURL:      claudeTokenEndpoint,
+		grokUsageURL:        grokUsageEndpoint,
+		antigravityUsageURL: antigravityUsageEndpoint,
+		grokToken:           grok.AccessToken,
+		metaSnapshots:       func(accountID string) *meta.UsageSnapshot { return meta.SharedUsageStore().Snapshot(accountID) },
+		probeMeta:           func(accountID string) meta.ProbeOutcome { return meta.NewUsageProber().Probe(accountID, false) },
 		cache: newUsageCache(filepath.Join(paths.DataDir(), "usage-cache.json"), time.Now, func() time.Duration {
 			return time.Duration(rand.Int64N(int64(30 * time.Second)))
 		}),
@@ -97,6 +104,13 @@ func (t *Tracker) SetBaseURLs(codexUsage, claudeUsage, claudeToken string) {
 func (t *Tracker) SetBaseURLsWithGrok(codexUsage, claudeUsage, claudeToken, grokUsage string) {
 	t.mu.Lock()
 	t.codexUsageURL, t.claudeUsageURL, t.claudeTokenURL, t.grokUsageURL = codexUsage, claudeUsage, claudeToken, grokUsage
+	t.mu.Unlock()
+}
+
+// SetAntigravityBaseURL overrides the Antigravity quota endpoint (tests only).
+func (t *Tracker) SetAntigravityBaseURL(antigravityUsage string) {
+	t.mu.Lock()
+	t.antigravityUsageURL = antigravityUsage
 	t.mu.Unlock()
 }
 
@@ -149,7 +163,16 @@ func (t *Tracker) IsRefreshing() bool {
 // accounts are skipped (Meta ignores key expiry: a stale card still shows its
 // "as of" time), and an empty selection clears the snapshot.
 func (t *Tracker) Refresh(codexAccounts, claudeAccounts, grokAccounts, metaAccounts []auth.Account) {
-	enabled := eligibleAccounts(codexAccounts, claudeAccounts, grokAccounts, metaAccounts)
+	t.refresh(codexAccounts, claudeAccounts, grokAccounts, metaAccounts, nil)
+}
+
+// RefreshWithAntigravity is Refresh plus Antigravity accounts.
+func (t *Tracker) RefreshWithAntigravity(codexAccounts, claudeAccounts, grokAccounts, metaAccounts, antigravityAccounts []auth.Account) {
+	t.refresh(codexAccounts, claudeAccounts, grokAccounts, metaAccounts, antigravityAccounts)
+}
+
+func (t *Tracker) refresh(codexAccounts, claudeAccounts, grokAccounts, metaAccounts, antigravityAccounts []auth.Account) {
+	enabled := eligibleAccounts(codexAccounts, claudeAccounts, grokAccounts, metaAccounts, antigravityAccounts)
 
 	t.mu.Lock()
 	t.generation++
@@ -197,9 +220,13 @@ func (t *Tracker) Refresh(codexAccounts, claudeAccounts, grokAccounts, metaAccou
 // eligibleAccounts keeps the accounts usage is read for. Disabled and expired
 // accounts are skipped; Meta ignores key expiry, since a stale card still
 // shows its "as of" time.
-func eligibleAccounts(codexAccounts, claudeAccounts, grokAccounts, metaAccounts []auth.Account) []auth.Account {
+func eligibleAccounts(codexAccounts, claudeAccounts, grokAccounts, metaAccounts []auth.Account, antigravityAccounts ...[]auth.Account) []auth.Account {
 	var enabled []auth.Account
-	for _, a := range append(append([]auth.Account(nil), codexAccounts...), claudeAccounts...) {
+	standard := append(append([]auth.Account(nil), codexAccounts...), claudeAccounts...)
+	for _, extra := range antigravityAccounts {
+		standard = append(standard, extra...)
+	}
+	for _, a := range standard {
 		if !a.Disabled && !a.IsExpired() {
 			enabled = append(enabled, a)
 		}
@@ -229,6 +256,8 @@ func (t *Tracker) fetch(accounts []auth.Account) []AccountUsage {
 				results[i] = t.cache.usage(account, func() AccountUsage { return t.fetchGrokUsage(account) })
 			case auth.Meta:
 				results[i] = t.cache.usage(account, func() AccountUsage { return t.fetchMetaUsage(account) })
+			case auth.Antigravity:
+				results[i] = t.cache.usage(account, func() AccountUsage { return t.fetchAntigravityUsage(account) })
 			default:
 				results[i] = t.cache.usage(account, func() AccountUsage { return t.fetchCodexUsage(account) })
 			}
@@ -325,6 +354,8 @@ func (t *Tracker) clientAndURL(kind string) (*http.Client, string) {
 		return t.client, t.claudeUsageURL
 	case "grok":
 		return t.client, t.grokUsageURL
+	case "antigravity":
+		return t.client, t.antigravityUsageURL
 	default:
 		return t.client, t.claudeTokenURL
 	}
@@ -451,6 +482,55 @@ func (t *Tracker) fetchGrokUsage(account auth.Account) AccountUsage {
 		return failedResponse(account, fmt.Sprintf("Grok usage API returned %d", status), status, header)
 	}
 	windows := ParseGrokWindows(data)
+	if len(windows) == 0 {
+		return failedAccount(account, "Usage response did not include quota windows")
+	}
+	return successAccount(account, windows)
+}
+
+// Antigravity.
+
+func (t *Tracker) fetchAntigravityUsage(account auth.Account) AccountUsage {
+	authData, ok := authValues(account.FilePath)
+	if !ok {
+		return localFailure(account, "Missing access token")
+	}
+	token, ok := authData["access_token"]
+	if !ok {
+		return localFailure(account, "Missing access token")
+	}
+	if account.IsAccessExpired() {
+		return localFailure(account, "Access token expired; it renews on this account's next request")
+	}
+	project, ok := authData["project_id"]
+	if !ok {
+		return localFailure(account, "Missing project ID")
+	}
+	client, endpoint := t.clientAndURL("antigravity")
+	if _, err := url.Parse(endpoint); err != nil {
+		return localFailure(account, "Invalid usage endpoint")
+	}
+	body, err := json.Marshal(map[string]string{"project": project})
+	if err != nil {
+		return localFailure(account, "Invalid usage request")
+	}
+	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return localFailure(account, "Invalid usage endpoint")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", antigravityUserAgent)
+
+	data, status, header, err := doJSON(client, request)
+	if err != nil {
+		return failedAccount(account, errText(err))
+	}
+	if status < 200 || status >= 300 {
+		return failedResponse(account, fmt.Sprintf("Antigravity usage API returned %d", status), status, header)
+	}
+	windows := ParseAntigravityQuotaSummaryWindows(data)
 	if len(windows) == 0 {
 		return failedAccount(account, "Usage response did not include quota windows")
 	}

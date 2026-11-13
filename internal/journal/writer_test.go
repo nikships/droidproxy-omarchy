@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -172,7 +171,7 @@ func TestWriterQueueOverflowDropsWithoutBlocking(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer held.Close()
-	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+	if err := tryFlock(held); err != nil {
 		t.Fatal(err)
 	}
 
@@ -191,7 +190,7 @@ func TestWriterQueueOverflowDropsWithoutBlocking(t *testing.T) {
 		t.Fatalf("dropped = %d, want 5", w.dropped.Load())
 	}
 
-	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_UN); err != nil {
+	if err := held.Close(); err != nil { // closing releases the lock
 		t.Fatal(err)
 	}
 	w.close()
@@ -259,12 +258,11 @@ func holdLock(t *testing.T, path string) func() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+	if err := tryFlock(held); err != nil {
 		t.Fatal(err)
 	}
 	release := sync.OnceFunc(func() {
-		_ = syscall.Flock(int(held.Fd()), syscall.LOCK_UN)
-		held.Close()
+		held.Close() // closing releases the lock
 	})
 	t.Cleanup(release)
 	return release

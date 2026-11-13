@@ -276,7 +276,7 @@ func (d *Daemon) usageAccounts(st auth.ServiceType) []auth.Account {
 // here refreshes the quota tracker.
 func (d *Daemon) usageSignature() string {
 	var parts []string
-	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta} {
+	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta, auth.Antigravity} {
 		parts = append(parts, providerUsageSignature(st, d.usageAccounts(st)))
 	}
 	return strings.Join(parts, "||")
@@ -306,7 +306,7 @@ func providerUsageSignature(st auth.ServiceType, accounts []auth.Account) string
 }
 
 func (d *Daemon) refreshUsage() {
-	go d.usage.Refresh(d.usageAccounts(auth.Codex), d.usageAccounts(auth.Claude), d.usageAccounts(auth.Grok), d.usageAccounts(auth.Meta))
+	go d.usage.RefreshWithAntigravity(d.usageAccounts(auth.Codex), d.usageAccounts(auth.Claude), d.usageAccounts(auth.Grok), d.usageAccounts(auth.Meta), d.usageAccounts(auth.Antigravity))
 }
 
 // serveUsageEndpoint answers ThinkingProxy's GET /droidproxy/usage.
@@ -316,7 +316,7 @@ func (d *Daemon) serveUsageEndpoint(requestPath string) (int, []byte, bool) {
 		return 0, nil, false
 	}
 	accounts := map[auth.ServiceType][]auth.Account{}
-	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta} {
+	for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta, auth.Antigravity} {
 		accounts[st] = d.authMgr.Accounts(st)
 	}
 	status, body := d.usage.ServeEndpoint(filter, accounts, time.Now())

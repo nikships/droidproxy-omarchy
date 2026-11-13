@@ -24,7 +24,7 @@ const EndpointPath = "/droidproxy/usage"
 const proxyPort = 8317
 
 // EndpointFilter holds the optional query parameters: provider (codex,
-// claude, grok or meta) and account (auth file name, email or display name).
+// claude, grok, meta or antigravity) and account (auth file name, email or display name).
 type EndpointFilter struct {
 	Provider string
 	Account  string
@@ -100,10 +100,10 @@ func (t *Tracker) ServeEndpoint(filter EndpointFilter, accounts map[auth.Service
 		}
 		return out
 	}
-	eligible := eligibleAccounts(candidates(auth.Codex), candidates(auth.Claude), candidates(auth.Grok), candidates(auth.Meta))
+	eligible := eligibleAccounts(candidates(auth.Codex), candidates(auth.Claude), candidates(auth.Grok), candidates(auth.Meta), candidates(auth.Antigravity))
 	if len(eligible) == 0 {
 		available := []map[string]string{}
-		for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta} {
+		for _, st := range []auth.ServiceType{auth.Codex, auth.Claude, auth.Grok, auth.Meta, auth.Antigravity} {
 			for _, a := range accounts[st] {
 				available = append(available, map[string]string{"provider": string(st), "account": a.DisplayName(), "id": a.ID})
 			}

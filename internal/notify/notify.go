@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -216,7 +215,7 @@ var (
 	lookPath      = exec.LookPath
 	startDetached = func(path string, args ...string) error {
 		cmd := exec.Command(path, args...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		cmd.SysProcAttr = detachedAttr()
 		return cmd.Start()
 	}
 )
