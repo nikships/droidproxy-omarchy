@@ -180,7 +180,8 @@ func CheckFactoryModelsInstalled(isProviderEnabled func(auth.ServiceType) bool) 
 // ApplyFactoryCustomModels merges the enabled DroidProxy models into
 // ~/.factory/settings.json. Other settings keys and non-DroidProxy custom
 // models are kept; every previous DroidProxy entry is replaced. A timestamped
-// backup (settings.json.droidproxy-yyyyMMdd-HHmmss.bak) is written first.
+// backup (settings.json.droidproxy-yyyyMMdd-HHmmss.bak) is written first,
+// only when the file actually changes.
 //
 // The returned message is the user-facing text for both outcomes; err is
 // non-nil on failure.
@@ -230,8 +231,6 @@ func ApplyFactoryCustomModels(isProviderEnabled func(auth.ServiceType) bool) (st
 }
 
 func writeFactorySettings(path string, settings map[string]any) error {
-	backupFactorySettingsIfPresent(path)
-
 	// Go sorts map keys, matching JSONSerialization's .sortedKeys. HTML
 	// escaping is off so URLs and "<"/">" stay literal, like the Swift output
 	// after it undoes its "\/" escaping.
@@ -243,6 +242,12 @@ func writeFactorySettings(path string, settings map[string]any) error {
 		return err
 	}
 	data := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+
+	// A re-apply that changes nothing leaves the file and its backups alone.
+	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
+		return nil
+	}
+	backupFactorySettingsIfPresent(path)
 
 	mode := os.FileMode(0o644)
 	if info, err := os.Stat(path); err == nil {

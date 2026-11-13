@@ -236,6 +236,15 @@ func TestApplyWritesTimestampedBackup(t *testing.T) {
 		t.Errorf("backup content = %s", data)
 	}
 
+	// An unchanged re-apply writes no new backup.
+	now = func() time.Time { return fake.Add(time.Minute) }
+	if _, err := ApplyFactoryCustomModels(allEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := filepath.Glob(filepath.Join(home(t), ".factory", "*.bak")); len(entries) != 1 {
+		t.Errorf("re-apply backups = %v, want only the first", entries)
+	}
+
 	// No settings file → no backup.
 	if err := os.Remove(backup); err != nil {
 		t.Fatal(err)
