@@ -9,22 +9,46 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// openFileNoFollow opens path and rejects it when the opened handle is a
-// reparse point. Windows has no O_NOFOLLOW, so the check runs on the handle
-// right after open; callers fingerprint the path before and after, which
-// bounds the swap window the same way the unix checks do.
-func openFileNoFollow(path string, flags int, perm fs.FileMode, _ bool) (*os.File, error) {
-	f, err := os.OpenFile(path, flags, perm)
+// openFileNoFollow opens path without following a final reparse point
+// (symlink or junction) and rejects one. Windows has no O_NOFOLLOW, and
+// os.OpenFile only passes FILE_FLAG_OPEN_REPARSE_POINT through from Go 1.26,
+// so this calls CreateFile itself. It supports the flags the journal uses:
+// O_RDONLY or O_RDWR, optionally with O_APPEND and O_CREATE|O_EXCL.
+func openFileNoFollow(path string, flags int, _ fs.FileMode, _ bool) (*os.File, error) {
+	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return nil, err
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+	}
+	access := uint32(windows.GENERIC_READ)
+	if flags&os.O_RDWR != 0 {
+		access |= windows.GENERIC_WRITE
+	}
+	if flags&os.O_APPEND != 0 {
+		// Match os.OpenFile: append-only data rights so writes land at EOF.
+		access &^= windows.GENERIC_WRITE
+		access |= windows.FILE_APPEND_DATA | windows.FILE_WRITE_ATTRIBUTES |
+			windows.FILE_WRITE_EA | windows.STANDARD_RIGHTS_WRITE | windows.SYNCHRONIZE
+	}
+	create := uint32(windows.OPEN_EXISTING)
+	if flags&(os.O_CREATE|os.O_EXCL) == os.O_CREATE|os.O_EXCL {
+		create = windows.CREATE_NEW
+	}
+	h, err := windows.CreateFile(name, access,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, create,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(windows.Handle(f.Fd()), &info); err == nil &&
-		info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		f.Close()
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		windows.CloseHandle(h)
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		windows.CloseHandle(h)
 		return nil, fmt.Errorf("%s is a symbolic link", path)
 	}
-	return f, nil
+	return os.NewFile(uintptr(h), path), nil
 }
 
 // openFilePlain opens path, following symlinks.
