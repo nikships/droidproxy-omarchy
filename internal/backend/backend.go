@@ -16,7 +16,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -333,8 +332,8 @@ func (m *Manager) streamLogs(r io.Reader, prefix string) {
 	}
 }
 
-// Stop terminates the backend: SIGTERM first, then SIGKILL after the graceful
-// window. Safe to call when not running.
+// Stop terminates the backend: SIGTERM first (a kill on Windows), then SIGKILL
+// after the graceful window. Safe to call when not running.
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	cmd := m.cmd
@@ -348,7 +347,7 @@ func (m *Manager) Stop() {
 	m.mu.Unlock()
 
 	m.addLog(fmt.Sprintf("Stopping server (PID: %d)...", cmd.Process.Pid))
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	_ = terminate(cmd.Process)
 
 	select {
 	case <-done:
@@ -576,7 +575,7 @@ func (m *Manager) CancelAuthCommand(command AuthCommand) bool {
 	if cmd == nil || cmd.Process == nil {
 		return false
 	}
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := terminate(cmd.Process); err != nil {
 		logx.Logf("[Auth] Cancel %s: signal PID %d: %v", command, cmd.Process.Pid, err)
 		return false
 	}
