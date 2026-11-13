@@ -411,6 +411,27 @@ func TestGemini4CarbonUsesAntigravityModelMetadata(t *testing.T) {
 	assertStringSlice(t, gemini["supportedReasoningEfforts"], []string{"low", "medium", "high"})
 }
 
+func TestGemini4HydrogenUsesAntigravityModelMetadata(t *testing.T) {
+	gemini := mustEntry(t, "custom:droidproxy:gemini-4-hydrogen-xhigh")
+
+	if gemini["model"] != "gemini-4-hydrogen-xhigh" {
+		t.Errorf("model = %v", gemini["model"])
+	}
+	if gemini["provider"] != "openai" || gemini["baseUrl"] != "http://localhost:8317/v1" {
+		t.Errorf("route = %v / %v", gemini["provider"], gemini["baseUrl"])
+	}
+	if gemini["displayName"] != "DroidProxy: Antigravity: Gemini 4 Hydrogen" {
+		t.Errorf("displayName = %v", gemini["displayName"])
+	}
+	if gemini["maxOutputTokens"] != 65536 {
+		t.Errorf("maxOutputTokens = %v", gemini["maxOutputTokens"])
+	}
+	if gemini["reasoningEffort"] != "xhigh" || gemini["defaultReasoningEffort"] != "xhigh" {
+		t.Errorf("efforts = %v / %v", gemini["reasoningEffort"], gemini["defaultReasoningEffort"])
+	}
+	assertStringSlice(t, gemini["supportedReasoningEfforts"], []string{"low", "medium", "high", "xhigh"})
+}
+
 func TestAntigravityClaudeModelMetadata(t *testing.T) {
 	for _, m := range []struct {
 		slug, displayName string
