@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -316,6 +317,11 @@ func appendLine(dir, month string, line []byte, stop <-chan struct{}, start func
 		return 0, errAbandoned
 	}
 	if removed, err = repairTornTail(f); err != nil {
+		return removed, err
+	}
+	// Windows opens the file without append-only rights so the repair above
+	// can truncate; seek to the end so the line lands there either way.
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
 		return removed, err
 	}
 	// os.File.Write retries short writes until the whole line is written or

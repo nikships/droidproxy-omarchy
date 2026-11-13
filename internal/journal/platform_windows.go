@@ -13,7 +13,9 @@ import (
 // (symlink or junction) and rejects one. Windows has no O_NOFOLLOW, and
 // os.OpenFile only passes FILE_FLAG_OPEN_REPARSE_POINT through from Go 1.26,
 // so this calls CreateFile itself. It supports the flags the journal uses:
-// O_RDONLY or O_RDWR, optionally with O_APPEND and O_CREATE|O_EXCL.
+// O_RDONLY or O_RDWR, optionally with O_CREATE|O_EXCL. O_APPEND is not
+// honored: an append-only handle can't truncate a torn tail, so appendLine
+// seeks to the end itself.
 func openFileNoFollow(path string, flags int, _ fs.FileMode, _ bool) (*os.File, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -22,12 +24,6 @@ func openFileNoFollow(path string, flags int, _ fs.FileMode, _ bool) (*os.File, 
 	access := uint32(windows.GENERIC_READ)
 	if flags&os.O_RDWR != 0 {
 		access |= windows.GENERIC_WRITE
-	}
-	if flags&os.O_APPEND != 0 {
-		// Match os.OpenFile: append-only data rights so writes land at EOF.
-		access &^= windows.GENERIC_WRITE
-		access |= windows.FILE_APPEND_DATA | windows.FILE_WRITE_ATTRIBUTES |
-			windows.FILE_WRITE_EA | windows.STANDARD_RIGHTS_WRITE | windows.SYNCHRONIZE
 	}
 	create := uint32(windows.OPEN_EXISTING)
 	if flags&(os.O_CREATE|os.O_EXCL) == os.O_CREATE|os.O_EXCL {
