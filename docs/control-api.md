@@ -127,8 +127,8 @@ All keys are always present. Strings are never `null`; use `""`.
       ],
       "models": [                  // catalog models for this provider
         {
-          "slug": "fable-5-1",     // catalog ID slug (model.setEnabled key)
-          "displayName": "Fable 5.1",
+          "slug": "fable-5-2",     // catalog ID slug (model.setEnabled key)
+          "displayName": "Fable 5.2",
           "enabled": true,         // desired state (missing prefs = enabled)
           "installed": true        // its custom:droidproxy: entry is in the Factory config
         }

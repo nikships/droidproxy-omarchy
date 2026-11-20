@@ -216,8 +216,9 @@ func hasUsableMetaAPIKey() bool {
 func Definitions() []ModelDefinition {
 	list := []ModelDefinition{
 		{
-			BaseModel: "claude-fable-5-1", IDSlug: "fable-5-1", DisplayName: "Fable 5.1",
-			MaxOutputTokens: 128000, Provider: "anthropic", ProviderKey: "claude",
+			BaseModel: "claude-fable-5-2", IDSlug: "fable-5-2", DisplayName: "Fable 5.2",
+			// Factory's limit is input-only; reserve the full output allowance.
+			MaxOutputTokens: 128000, MaxContextLimit: 872_000, Provider: "anthropic", ProviderKey: "claude",
 			BaseURL: "http://localhost:8317", Kind: KindClaudeAdaptive,
 			Levels: claudeAdvancedLevels(), DefaultLevelValue: "xhigh",
 		},

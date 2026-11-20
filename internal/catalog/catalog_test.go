@@ -66,11 +66,14 @@ func TestMuseVariantsApplyMaxReasoning(t *testing.T) {
 	}
 }
 
-func TestFable51ExposesFullEffortLevels(t *testing.T) {
-	fable := mustEntry(t, "custom:droidproxy:fable-5-1")
+func TestFable52ExposesFullEffortLevels(t *testing.T) {
+	fable := mustEntry(t, "custom:droidproxy:fable-5-2")
 
-	if fable["model"] != "claude-fable-5-1" {
+	if fable["model"] != "claude-fable-5-2" {
 		t.Errorf("model = %v", fable["model"])
+	}
+	if fable["displayName"] != "DroidProxy: Fable 5.2" {
+		t.Errorf("displayName = %v", fable["displayName"])
 	}
 	if fable["enableThinking"] != true {
 		t.Errorf("enableThinking = %v", fable["enableThinking"])
@@ -81,6 +84,9 @@ func TestFable51ExposesFullEffortLevels(t *testing.T) {
 	assertStringSlice(t, fable["supportedReasoningEfforts"], []string{"low", "medium", "high", "xhigh", "max"})
 	if fable["maxOutputTokens"] != 128000 {
 		t.Errorf("maxOutputTokens = %v", fable["maxOutputTokens"])
+	}
+	if fable["maxContextLimit"] != 872000 {
+		t.Errorf("maxContextLimit = %v", fable["maxContextLimit"])
 	}
 }
 
@@ -113,12 +119,12 @@ func TestOpus55ExposesFullEffortLevels(t *testing.T) {
 
 func TestApplyWritesOnlyLatestOpusAndFableForClaudeProvider(t *testing.T) {
 	// Apply/Re-apply serializes every enabled definition via SettingsModels;
-	// Claude OAuth writes only the latest Opus (5.5) and Fable (5.1).
+	// Claude OAuth writes only the latest Opus (5.5) and Fable (5.2).
 	claudeIDs := idsOf(SettingsModels(func(key string) bool { return key == "claude" }))
-	if !claudeIDs["custom:droidproxy:opus-5-5"] || !claudeIDs["custom:droidproxy:fable-5-1"] {
+	if !claudeIDs["custom:droidproxy:opus-5-5"] || !claudeIDs["custom:droidproxy:fable-5-2"] {
 		t.Fatalf("missing current Claude models: %v", claudeIDs)
 	}
-	for _, retired := range []string{"opus-5", "opus-4-8", "fable-5"} {
+	for _, retired := range []string{"opus-5", "opus-4-8", "fable-5", "fable-5-1"} {
 		if claudeIDs["custom:droidproxy:"+retired] {
 			t.Errorf("retired model %s still registered", retired)
 		}
