@@ -49,13 +49,14 @@ Open `~/.factory/settings.json` and add the following to the `customModels` arra
 ```json
 "customModels": [
     {
-      "model": "claude-fable-5-1",
-      "id": "custom:droidproxy:fable-5-1",
+      "model": "claude-fable-5-2",
+      "id": "custom:droidproxy:fable-5-2",
       "index": 0,
       "baseUrl": "http://localhost:8317",
       "apiKey": "dummy-not-used",
-      "displayName": "DroidProxy: Fable 5.1",
+      "displayName": "DroidProxy: Fable 5.2",
       "maxOutputTokens": 128000,
+      "maxContextLimit": 872000,
       "noImageSupport": false,
       "provider": "anthropic"
     },
@@ -160,7 +161,7 @@ Use the standard Claude, Codex, Antigravity, and Kimi model aliases in the `mode
 
 Reasoning effort is selected per session in Droid CLI's model picker. DroidProxy registers each model with its native reasoning levels, preserves the selected value, and lets CLIProxyAPI translate it to the upstream provider format. Supported levels per model:
 
-- Fable 5.1: `low`, `medium`, `high`, `xhigh`, or `max`
+- Fable 5.2: `low`, `medium`, `high`, `xhigh`, or `max`
 - Opus 5.5: `low`, `medium`, `high`, `xhigh`, or `max`
 - Sonnet 5.5, Haiku 5.5: `low`, `medium`, `high`, `xhigh`, or `max`
 - GPT 6 Astra, GPT 6.1 Sol, GPT 6.1 Terra, GPT 6 Luna: `low`, `medium`, `high`, `xhigh`, or `max`

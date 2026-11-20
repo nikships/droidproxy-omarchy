@@ -121,7 +121,7 @@ func TestApplyMergesModelsAndKeepsOtherSettings(t *testing.T) {
 	if len(ids) != len(Definitions())+1 {
 		t.Errorf("expected %d models, got %v", len(Definitions())+1, ids)
 	}
-	if modelIndexFor(t, models, "custom:droidproxy:fable-5-1") != 1 {
+	if modelIndexFor(t, models, "custom:droidproxy:fable-5-2") != 1 {
 		t.Error("DroidProxy entries must start at index = kept count")
 	}
 }
